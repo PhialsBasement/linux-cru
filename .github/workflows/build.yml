@@ -22,7 +22,7 @@ jobs:
     - name: Install dependencies
       run: |
         pacman -Syu --noconfirm
-        pacman -S --noconfirm base-devel python tk xorg-server-utils imagemagick wget git
+        pacman -S --noconfirm base-devel python tk xorg-xrandr xorg-cvt imagemagick wget git
 
     - name: Build AppImage
       run: |
