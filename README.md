@@ -2,7 +2,7 @@
 
 A simple graphical utility for creating and applying custom display resolutions on Linux systems. This tool makes it easy to set up custom resolutions and refresh rates without manually editing configuration files.
 
-![Linux CRU Screenshot](screenshots/main.png)
+![Linux CRU Screenshot](image.png)
 
 ## Features
 
