@@ -1,5 +1,4 @@
 name: Build and Release AppImage
-
 on:
   push:
     branches: [ main ]
@@ -12,7 +11,6 @@ on:
 permissions:
   contents: write
   packages: write
-  releases: write
 
 jobs:
   build:
@@ -20,22 +18,18 @@ jobs:
     container:
       image: archlinux:latest
       options: --privileged
-
     steps:
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0
-
     - name: Install dependencies
       run: |
         pacman -Syu --noconfirm
         pacman -S --noconfirm base-devel python tk xorg-apps imagemagick wget git
-
     - name: Build AppImage
       run: |
         chmod +x build_appimage.sh
         ./build_appimage.sh
-
     - name: Generate new tag
       id: tag
       run: |
@@ -46,7 +40,6 @@ jobs:
         new_patch=$((patch + 1))
         new_tag="v$major.$minor.$new_patch"
         echo "new_tag=$new_tag" >> $GITHUB_OUTPUT
-
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
