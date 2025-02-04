@@ -1,0 +1,69 @@
+name: Build and Release AppImage
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'linux-cru.py'
+      - 'build_appimage.sh'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:  # Allows manual trigger
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+      options: --privileged
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        pacman -Syu --noconfirm
+        pacman -S --noconfirm base-devel python tk xorg-server-utils imagemagick wget git
+
+    - name: Build AppImage
+      run: |
+        chmod +x build_appimage.sh
+        ./build_appimage.sh
+
+    - name: Get previous tag
+      id: previoustag
+      uses: WyriHaximus/github-action-get-previous-tag@v1
+      continue-on-error: true
+
+    - name: Generate new tag
+      id: newtag
+      run: |
+        if [ "${{ steps.previoustag.outputs.tag }}" = "" ]; then
+          echo "::set-output name=tag::v1.0.0"
+        else
+          current_version=${{ steps.previoustag.outputs.tag }}
+          major=$(echo $current_version | cut -d. -f1 | tr -d 'v')
+          minor=$(echo $current_version | cut -d. -f2)
+          patch=$(echo $current_version | cut -d. -f3)
+          new_patch=$((patch + 1))
+          echo "::set-output name=tag::v$major.$minor.$new_patch"
+        fi
+
+    - name: Create Release
+      id: create_release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.newtag.outputs.tag }}
+        name: Release ${{ steps.newtag.outputs.tag }}
+        draft: false
+        prerelease: false
+        files: |
+          Linux_CRU-x86_64.AppImage
+        body: |
+          Automated release for commit ${{ github.sha }}
+          
+          Changes in this release:
+          - Updated AppImage build
+          
+          Download the AppImage, make it executable with `chmod +x Linux_CRU-x86_64.AppImage`, and run it!
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
