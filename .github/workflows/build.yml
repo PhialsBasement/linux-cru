@@ -9,6 +9,11 @@ on:
       - '.github/workflows/build.yml'
   workflow_dispatch:  # Allows manual trigger
 
+permissions:
+  contents: write
+  packages: write
+  releases: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -18,6 +23,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
     - name: Install dependencies
       run: |
@@ -29,35 +36,25 @@ jobs:
         chmod +x build_appimage.sh
         ./build_appimage.sh
 
-    - name: Get previous tag
-      id: previoustag
-      uses: WyriHaximus/github-action-get-previous-tag@v1
-      continue-on-error: true
-
     - name: Generate new tag
-      id: newtag
+      id: tag
       run: |
-        if [ "${{ steps.previoustag.outputs.tag }}" = "" ]; then
-          echo "::set-output name=tag::v1.0.0"
-        else
-          current_version=${{ steps.previoustag.outputs.tag }}
-          major=$(echo $current_version | cut -d. -f1 | tr -d 'v')
-          minor=$(echo $current_version | cut -d. -f2)
-          patch=$(echo $current_version | cut -d. -f3)
-          new_patch=$((patch + 1))
-          echo "::set-output name=tag::v$major.$minor.$new_patch"
-        fi
+        latest_tag=$(git describe --tags `git rev-list --tags --max-count=1` 2>/dev/null || echo "v0.0.0")
+        major=$(echo $latest_tag | cut -d. -f1 | tr -d 'v')
+        minor=$(echo $latest_tag | cut -d. -f2)
+        patch=$(echo $latest_tag | cut -d. -f3)
+        new_patch=$((patch + 1))
+        new_tag="v$major.$minor.$new_patch"
+        echo "new_tag=$new_tag" >> $GITHUB_OUTPUT
 
     - name: Create Release
-      id: create_release
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: ${{ steps.newtag.outputs.tag }}
-        name: Release ${{ steps.newtag.outputs.tag }}
+        tag_name: ${{ steps.tag.outputs.new_tag }}
+        name: Release ${{ steps.tag.outputs.new_tag }}
         draft: false
         prerelease: false
-        files: |
-          Linux_CRU-x86_64.AppImage
+        files: Linux_CRU-x86_64.AppImage
         body: |
           Automated release for commit ${{ github.sha }}
           
