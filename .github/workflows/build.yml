@@ -22,11 +22,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y fuse libfuse2
-    - name: Setup Arch Linux container
-      uses: ./
-      with:
-        pacstrap: python tk xorg-apps imagemagick wget git base-devel
+        sudo apt-get install -y fuse libfuse2 python3-tk imagemagick
     - name: Build AppImage
       run: |
         chmod +x build_appimage.sh
