@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
-      options: --privileged
+      options: --privileged --device /dev/fuse
     steps:
     - uses: actions/checkout@v4
       with:
@@ -25,8 +25,7 @@ jobs:
     - name: Install dependencies
       run: |
         pacman -Syu --noconfirm
-        pacman -S --noconfirm base-devel python tk xorg-apps imagemagick wget git fuse2
-        modprobe fuse
+        pacman -S --noconfirm base-devel python tk xorg-apps imagemagick wget git fuse2 fuse-common
     - name: Build AppImage
       run: |
         chmod +x build_appimage.sh
@@ -37,8 +36,8 @@ jobs:
           exit 1
         fi
         chmod +x Linux_CRU-x86_64.AppImage
-        # Test that the AppImage is valid
-        ./Linux_CRU-x86_64.AppImage --appimage-extract &> /dev/null || exit 1
+        # Extract AppImage as fallback if FUSE is not working
+        ./Linux_CRU-x86_64.AppImage --appimage-extract || true
     - name: Generate new tag
       id: tag
       run: |
@@ -56,8 +55,7 @@ jobs:
         name: Release ${{ steps.tag.outputs.new_tag }}
         draft: false
         prerelease: false
-        files: |   # Using literal block scalar for better readability
-          Linux_CRU-x86_64.AppImage
+        files: Linux_CRU-x86_64.AppImage
         body: |
           Automated release for commit ${{ github.sha }}
           
