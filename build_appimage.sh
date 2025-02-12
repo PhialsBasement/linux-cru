@@ -1,10 +1,6 @@
 #!/bin/bash
 # build_appimage.sh - Main script to build the AppImage for Arch Linux
 
-# Ensure required packages are installed
-echo "Checking/installing required packages..."
-sudo pacman -S --needed python tk xorg-server-utils imagemagick
-
 # First check for the Python script
 echo "Checking for linux-cru.py..."
 if [ ! -f "linux-cru.py" ]; then
@@ -83,18 +79,14 @@ exec "${HERE}/usr/bin/linux_cru" "$@"
 EOF
 chmod +x linux_cru.AppDir/AppRun
 
-# Copy required system libraries with sudo
-echo "Copying system libraries..."
-sudo cp /usr/lib/libtk8.6.so linux_cru.AppDir/usr/lib/
-sudo cp /usr/lib/libtcl8.6.so linux_cru.AppDir/usr/lib/
-sudo cp -r /usr/lib/tk8.6 linux_cru.AppDir/usr/lib/
-sudo cp -r /usr/lib/tcl8.6 linux_cru.AppDir/usr/lib/
-sudo chown -R $USER:$USER linux_cru.AppDir/usr/lib/
+# Copy required system libraries
+cp /usr/lib/libtk8.6.so linux_cru.AppDir/usr/lib/
+cp /usr/lib/libtcl8.6.so linux_cru.AppDir/usr/lib/
+cp -r /usr/lib/tk8.6 linux_cru.AppDir/usr/lib/
+cp -r /usr/lib/tcl8.6 linux_cru.AppDir/usr/lib/
 
 # Copy Python standard library
-echo "Copying Python standard library..."
-sudo cp -r /usr/lib/python3.12/* linux_cru.AppDir/usr/lib/python3.12/
-sudo chown -R $USER:$USER linux_cru.AppDir/usr/lib/python3.12/
+cp -r /usr/lib/python3.12/* linux_cru.AppDir/usr/lib/python3.12/
 
 # Download appimagetool if not already present
 if [ ! -f "appimagetool-x86_64.AppImage" ]; then
@@ -105,6 +97,13 @@ fi
 
 # Build the AppImage
 echo "Building AppImage..."
+chmod +x linux_cru.AppDir/AppRun
 ARCH=x86_64 ./appimagetool-x86_64.AppImage linux_cru.AppDir Linux_CRU-x86_64.AppImage
 
+if [ ! -f "Linux_CRU-x86_64.AppImage" ]; then
+    echo "Error: AppImage creation failed!"
+    exit 1
+fi
+
+chmod +x Linux_CRU-x86_64.AppImage
 echo "AppImage created successfully: Linux_CRU-x86_64.AppImage"
