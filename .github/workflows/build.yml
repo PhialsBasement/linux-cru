@@ -6,7 +6,7 @@ on:
       - 'linux-cru.py'
       - 'build_appimage.sh'
       - '.github/workflows/build.yml'
-  workflow_dispatch:  # Allows manual trigger
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,29 +15,22 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container:
-      image: archlinux:latest
-      options: --privileged --device /dev/fuse
     steps:
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0
     - name: Install dependencies
       run: |
-        pacman -Syu --noconfirm
-        pacman -S --noconfirm base-devel python tk xorg-apps imagemagick wget git fuse2 fuse-common
+        sudo apt-get update
+        sudo apt-get install -y fuse libfuse2
+    - name: Setup Arch Linux container
+      uses: ./
+      with:
+        pacstrap: python tk xorg-apps imagemagick wget git base-devel
     - name: Build AppImage
       run: |
         chmod +x build_appimage.sh
         ./build_appimage.sh
-        # Ensure AppImage is properly created and has correct permissions
-        if [ ! -f "Linux_CRU-x86_64.AppImage" ]; then
-          echo "AppImage was not created successfully!"
-          exit 1
-        fi
-        chmod +x Linux_CRU-x86_64.AppImage
-        # Extract AppImage as fallback if FUSE is not working
-        ./Linux_CRU-x86_64.AppImage --appimage-extract || true
     - name: Generate new tag
       id: tag
       run: |
