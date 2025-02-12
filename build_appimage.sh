@@ -9,14 +9,14 @@ if [ ! -f "linux-cru.py" ]; then
 fi
 
 # Create directory structure
-mkdir -p linux_cru.AppDir/{usr/{bin,share/{applications,icons/hicolor/{16x16,32x32,48x48,64x64,128x128,256x256,512x512,scalable}/apps},lib/python3.12/site-packages},etc}
+mkdir -p linux_cru.AppDir/{usr/{bin,share/{applications,icons/hicolor/{16x16,32x32,48x48,64x64,128x128,256x256,512x512,scalable}/apps},lib/python3/dist-packages},etc}
 
 # Copy your script
 cp linux-cru.py linux_cru.AppDir/usr/bin/linux_cru
 chmod +x linux_cru.AppDir/usr/bin/linux_cru
 
 # Create the desktop entry
-cat > linux_cru.AppDir/linux_cru.desktop << 'EOF'
+cat > linux_cru.AppDir/usr/share/applications/linux_cru.desktop << 'EOF'
 [Desktop Entry]
 Name=Linux Custom Resolution Utility
 Exec=linux_cru
@@ -26,9 +26,8 @@ Categories=Settings
 Comment=Custom Resolution Utility for Linux
 EOF
 
-# Create symlinks required by AppImage
-ln -sf usr/share/applications/linux_cru.desktop linux_cru.AppDir/linux_cru.desktop
-cp linux_cru.AppDir/linux_cru.desktop linux_cru.AppDir/usr/share/applications/
+# Create desktop entry symlink
+cp linux_cru.AppDir/usr/share/applications/linux_cru.desktop linux_cru.AppDir/
 
 # Create SVG icon
 cat > linux_cru.AppDir/usr/share/icons/hicolor/scalable/apps/linux_cru.svg << 'EOF'
@@ -56,7 +55,7 @@ EOF
 
 # Convert SVG to PNG for all required sizes
 for size in 16 32 48 64 128 256 512; do
-    magick convert -background none -size ${size}x${size} \
+    convert -background none -size ${size}x${size} \
         linux_cru.AppDir/usr/share/icons/hicolor/scalable/apps/linux_cru.svg \
         linux_cru.AppDir/usr/share/icons/hicolor/${size}x${size}/apps/linux_cru.png
 done
@@ -69,7 +68,7 @@ cat > linux_cru.AppDir/AppRun << 'EOF'
 #!/bin/bash
 HERE="$(dirname "$(readlink -f "${0}")")"
 export PATH="${HERE}/usr/bin:${PATH}"
-export PYTHONPATH="${HERE}/usr/lib/python3.12/site-packages:${PYTHONPATH}"
+export PYTHONPATH="${HERE}/usr/lib/python3/dist-packages:${PYTHONPATH}"
 export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
 export TCL_LIBRARY="${HERE}/usr/lib/tcl8.6"
 export TK_LIBRARY="${HERE}/usr/lib/tk8.6"
@@ -80,13 +79,12 @@ EOF
 chmod +x linux_cru.AppDir/AppRun
 
 # Copy required system libraries
-cp /usr/lib/libtk8.6.so linux_cru.AppDir/usr/lib/
-cp /usr/lib/libtcl8.6.so linux_cru.AppDir/usr/lib/
-cp -r /usr/lib/tk8.6 linux_cru.AppDir/usr/lib/
+cp -r /usr/lib/x86_64-linux-gnu/{libtk8.6.so,libtcl8.6.so} linux_cru.AppDir/usr/lib/
 cp -r /usr/lib/tcl8.6 linux_cru.AppDir/usr/lib/
+cp -r /usr/lib/tk8.6 linux_cru.AppDir/usr/lib/
 
 # Copy Python standard library
-cp -r /usr/lib/python3.12/* linux_cru.AppDir/usr/lib/python3.12/
+cp -r /usr/lib/python3/dist-packages/* linux_cru.AppDir/usr/lib/python3/dist-packages/
 
 # Download appimagetool if not already present
 if [ ! -f "appimagetool-x86_64.AppImage" ]; then
