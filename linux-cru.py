@@ -145,6 +145,9 @@ class LinuxCRU:
         display_combo.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
         display_frame.grid_columnconfigure(0, weight=1)
         
+        # Refresh button to get current resolution
+        ttk.Button(display_frame, text="Get Current Settings", command=self.get_current_resolution).grid(row=0, column=1, padx=5, pady=5)
+        
         display_combo.bind('<<ComboboxSelected>>', lambda e: self.generate_preview())
 
     def create_resolution_section(self):
@@ -172,6 +175,21 @@ class LinuxCRU:
         ttk.Label(res_frame, text="pixels").grid(row=1, column=2, sticky="w", padx=5)
         ttk.Label(res_frame, text="Hz").grid(row=2, column=2, sticky="w", padx=5)
 
+    def get_current_resolution(self):
+        """Get current resolution and refresh rate of the selected display"""
+        try:
+            display = self.display_var.get()
+            output = subprocess.check_output(['xrandr', '--verbose'], universal_newlines=True)
+            for line in output.splitlines():
+                if display in line and "*current" in line:
+                    match = re.search(r'(\d+)x(\d+).*?([\d\.]+)\*', line)
+                    if match:
+                        self.width_var.set(match.group(1))
+                        self.height_var.set(match.group(2))
+                        self.refresh_var.set(match.group(3))
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to get current resolution: {str(e)}")
+
     def create_advanced_section(self):
         adv_frame = ttk.LabelFrame(self.main_frame, text="Advanced Settings", padding=5)
         adv_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
@@ -196,6 +214,37 @@ class LinuxCRU:
                                  variable=self.force_enable,
                                  command=self.generate_preview)
         fe_check.grid(row=1, column=0, sticky="w")
+
+        # Add modeline type selection
+        ttk.Label(options_frame, text="Modeline Type:").grid(row=2, column=0, sticky="w", pady=(10, 5))
+        
+        self.modeline_type = tk.StringVar(value="auto")
+        modeline_frame = ttk.Frame(options_frame)
+        modeline_frame.grid(row=3, column=0, sticky="w", padx=20)
+        
+        ttk.Radiobutton(modeline_frame, 
+                        text="Auto", 
+                        variable=self.modeline_type, 
+                        value="auto",
+                        command=self.generate_preview).grid(row=0, column=0, sticky="w", padx=(0, 10))
+        
+        ttk.Radiobutton(modeline_frame, 
+                        text="CVT-RB", 
+                        variable=self.modeline_type, 
+                        value="cvt-rb",
+                        command=self.generate_preview).grid(row=0, column=1, sticky="w", padx=(0, 10))
+        
+        ttk.Radiobutton(modeline_frame, 
+                        text="CVT-RBv2", 
+                        variable=self.modeline_type, 
+                        value="cvt-rb2",
+                        command=self.generate_preview).grid(row=0, column=2, sticky="w", padx=(0, 10))
+        
+        ttk.Radiobutton(modeline_frame, 
+                        text="Custom", 
+                        variable=self.modeline_type, 
+                        value="custom",
+                        command=self.generate_preview).grid(row=0, column=3, sticky="w")
 
     def create_preview_section(self):
         preview_frame = ttk.LabelFrame(self.main_frame, text="Configuration Preview", padding=5)
@@ -277,7 +326,40 @@ class LinuxCRU:
         except subprocess.CalledProcessError:
             return ["HDMI-0"]
 
-    def calculate_modeline(self):
+    def calculate_cvt_rb2_modeline(self, width, height, refresh):
+        """Calculate CVT-RBv2 modeline parameters based on resolution and refresh rate"""
+        # CVT-RBv2 calculation based on the standard formula
+        # Implementation based on CVT-RBv2 standard
+        
+        # Fixed values for RBv2
+        c_prime = 30  # Cell granularity in pixels
+        margin_in_pixels = 1
+        min_vblank = 460  # Microseconds
+        h_sync_percentage = 0.08
+        
+        # Calculate RBv2 params
+        h_front_porch = 1  # Fixed in RBv2
+        h_sync_width = 8   # Fixed in RBv2
+        
+        total_active_pixels = width * height
+        h_period_est = ((c_prime - margin_in_pixels) / total_active_pixels) * 1000000 / refresh
+        
+        v_back_porch = int(min_vblank / h_period_est) + 1
+        v_sync = 8  # VSync pulse width
+        v_front_porch = 1  # Fixed in RBv2
+        v_blank = v_front_porch + v_sync + v_back_porch
+        
+        v_total_lines = height + v_blank
+        
+        total_h_pixels = width + h_front_porch + h_sync_width + (width * 0.3)  # Approximate RBv2 calculation
+        total_h_pixels = int(total_h_pixels / c_prime) * c_prime  # Round to cell granularity
+        h_back_porch = total_h_pixels - width - h_front_porch - h_sync_width
+        
+        pixel_clock = total_h_pixels * v_total_lines * refresh / 1000000  # MHz
+        
+        return f"{pixel_clock:.6f} {width} {width + h_front_porch} {width + h_front_porch + h_sync_width} {total_h_pixels} {height} {height + v_front_porch} {height + v_front_porch + v_sync} {v_total_lines} +HSync -VSync"
+
+    def calculate_modeline(self, custom_type=None):
         """Calculate modeline parameters based on resolution and refresh rate"""
         width = int(self.width_var.get())
         height = int(self.height_var.get())
@@ -303,6 +385,66 @@ class LinuxCRU:
                    f"{height} {height + v_front} "
                    f"{height + v_front + v_sync} {v_total} "
                    f"-HSync +VSync")
+        elif self.modeline_type.get() == "cvt-rb" or custom_type == "cvt-rb":
+            # Use cvt with reduced blanking
+            try:
+                cvt = subprocess.check_output(
+                    ['cvt', '-r', str(width), str(height), str(refresh)],
+                    universal_newlines=True
+                )
+                modeline = re.search(r'Modeline.*"(.*)"(.*)', cvt)
+                if modeline:
+                    return modeline.group(2).strip()
+            except subprocess.CalledProcessError:
+                pass
+                
+            # Fallback calculations for CVT-RB
+            h_front = 48
+            h_sync = 32
+            h_back = 80
+            
+            v_front = 3
+            v_sync = 10
+            v_back = 33
+            
+            h_total = width + h_front + h_sync + h_back
+            v_total = height + v_front + v_sync + v_back
+            
+            pixel_clock = h_total * v_total * refresh / 1000000  # MHz
+            
+            return (f"{pixel_clock:.2f} {width} {width + h_front} "
+                   f"{width + h_front + h_sync} {h_total} "
+                   f"{height} {height + v_front} "
+                   f"{height + v_front + v_sync} {v_total} "
+                   f"+HSync -VSync")
+        elif self.modeline_type.get() == "cvt-rb2" or custom_type == "cvt-rb2":
+            # Use CVT-RBv2 calculation for higher compatibility with modern displays
+            return self.calculate_cvt_rb2_modeline(width, height, refresh)
+        elif self.modeline_type.get() == "custom" or custom_type == "custom":
+            # Special case for Samsung OLED TVs (like S95B)
+            if width == 3840 and height == 2160 and 120 <= refresh <= 144:
+                # Samsung S95B OLED TV 4K@144Hz special modeline
+                return "1306.206 3840 3848 3880 3920 2160 2300 2308 2314 +HSync -VSync"
+            else:
+                # Conservative reduced blanking parameters as fallback
+                h_front = max(16, width // 100)
+                h_sync = max(32, width // 80)
+                h_back = max(48, width // 50)
+                
+                v_front = 1
+                v_sync = 1
+                v_back = max(3, height // 200)
+                
+                h_total = width + h_front + h_sync + h_back
+                v_total = height + v_front + v_sync + v_back
+                
+                pixel_clock = h_total * v_total * refresh / 1000000  # MHz
+                
+                return (f"{pixel_clock:.2f} {width} {width + h_front} "
+                       f"{width + h_front + h_sync} {h_total} "
+                       f"{height} {height + v_front} "
+                       f"{height + v_front + v_sync} {v_total} "
+                       f"-HSync +VSync")
         else:
             # Standard CVT parameters
             try:
@@ -379,18 +521,30 @@ options nvidia NVreg_RegistryDwords="CustomEDID={mode_name};EnableBrightnessCont
             # Create helper script
             script_path = f"{tmp_dir}/apply_config.sh"
             with open(script_path, 'w') as f:
-                f.write("""#!/bin/bash
+                f.write("""#!/bin/bash -e
 set -e
-cp "${1}/xorg.conf" /etc/X11/xorg.conf.d/10-custom-modes.conf
-cp "${1}/nvidia.conf" /etc/modprobe.d/nvidia.conf
-chmod 644 /etc/X11/xorg.conf.d/10-custom-modes.conf
-chmod 644 /etc/modprobe.d/nvidia.conf
-mkinitcpio -P
+mkdir -p /etc/X11/xorg.conf.d
+cp "${1}/xorg.conf" /etc/X11/xorg.conf.d/10-custom-modes.conf 
+cp "${1}/nvidia.conf" /etc/modprobe.d/nvidia.conf 
+chmod 644 /etc/X11/xorg.conf.d/10-custom-modes.conf 
+chmod 644 /etc/modprobe.d/nvidia.conf 
+
+# Check for mkinitcpio or dracut and update initramfs
+if command -v mkinitcpio >/dev/null 2>&1; then
+    mkinitcpio -P
+elif command -v dracut >/dev/null 2>&1; then
+    dracut --force
+elif command -v update-initramfs >/dev/null 2>&1; then
+    update-initramfs -u
+else
+    echo "Warning: Could not find mkinitcpio, dracut, or update-initramfs. Initramfs not updated."
+    # Still return success as the xorg config has been updated
+fi
 """)
             os.chmod(script_path, 0o755)
             
             # Run helper script with sudo
-            success, message = run_with_sudo([script_path, tmp_dir])
+            success, message = run_with_sudo(['/bin/bash', script_path, tmp_dir])
             
             # Cleanup temporary files
             try:
@@ -411,6 +565,20 @@ mkinitcpio -P
                                       "Configuration saved. The changes will take effect\n"
                                       "after you restart your display manager or reboot.")
             else:
+                # Check if partial success (script ran but returned error)
+                if os.path.exists('/etc/X11/xorg.conf.d/10-custom-modes.conf'):
+                    # If the file exists, it means the main config was applied
+                    restart = messagebox.askquestion("Partial Success",
+                                                  f"Configuration partially applied but with warning:\n{message}\n\n"
+                                                  "The custom resolution may still work.\n"
+                                                  "Would you like to restart the display manager now?\n"
+                                                  "(This will close all applications and log you out)",
+                                                  icon='warning')
+                    if restart == 'yes':
+                        run_with_sudo(['systemctl', 'restart', 'display-manager'])
+                    else:
+                        messagebox.showinfo("Partial Success",
+                                          "Configuration saved with warnings. Changes will take effect after restart.")
                 raise Exception(message)
             
         except Exception as e:
