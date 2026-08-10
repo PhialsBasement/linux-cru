@@ -215,6 +215,52 @@ def _bootloader():
     return "unknown"
 
 
+def compositor_can_apply(env: Environment, standard: str) -> bool:
+    """Can the display server itself produce exactly these timings?
+
+    Compositors differ in how much of a mode they accept. Some take a
+    full modeline, some take only width/height/refresh and compute the
+    timings with their own CVT implementation, and some cannot add
+    modes at all. When the answer is no, the mode has to go in through
+    an EDID override instead.
+    """
+    if env.session_type == "x11":
+        return True                      # xrandr takes a full modeline
+    if env.has_nvidia_proprietary:
+        return False                     # the driver rejects them all
+    if env.compositor in ("sway", "hyprland"):
+        return True                      # both accept a full modeline
+    if env.compositor == "kwin":
+        # kscreen-doctor takes width/height/refresh plus a blanking
+        # choice; KWin then computes CVT or CVT-RB with libxcvt.
+        return env.kde_custom_modes_available and standard in ("cvt", "cvt-rb")
+    if env.is_wlroots_family:
+        # wlr-randr's custom mode is CVT with full blanking only.
+        return standard == "cvt"
+    return False                         # GNOME, COSMIC, anything unknown
+
+
+def why_edid_needed(env: Environment, standard: str) -> str:
+    """Short reason the compositor cannot apply these timings."""
+    name = {"cvt": "CVT", "cvt-rb": "CVT-RB", "cvt-rb2": "CVT-RBv2"}.get(
+        standard, standard)
+    if env.has_nvidia_proprietary:
+        return "the NVIDIA driver does not accept custom modes from Wayland " \
+               "compositors"
+    if env.compositor == "kwin":
+        if not env.kde_custom_modes_available:
+            return (f"KDE Plasma {_fmt_ver(env.compositor_version)} cannot add "
+                    "custom modes (that needs Plasma 6.6 or newer)")
+        return f"KWin cannot generate {name} timings"
+    if env.is_wlroots_family:
+        return f"{env.compositor} can only generate CVT timings with full blanking"
+    if env.compositor == "mutter":
+        return "GNOME cannot add custom modes"
+    if env.compositor == "cosmic":
+        return "custom modes are currently broken in COSMIC"
+    return f"{env.compositor} cannot add custom modes"
+
+
 # -- current mode of an output ----------------------------------------------
 
 def current_mode(env: Environment, output: str):

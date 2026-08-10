@@ -201,15 +201,15 @@ class LinuxCRU:
             row += 1
 
         self.boot_method_var = tk.BooleanVar(value=False)
-        if self.use_edid_method():
-            ttk.Checkbutton(
-                frame,
-                text="Apply from the kernel command line instead of a boot "
-                     "service (needed only for the boot console and login "
-                     "screen; changes your boot configuration)",
-                variable=self.boot_method_var,
-                command=self.generate_preview).grid(row=row, column=0,
-                                                    sticky="w", padx=5, pady=(6, 0))
+        self.boot_method_check = ttk.Checkbutton(
+            frame,
+            text="Apply from the kernel command line instead of a boot service "
+                 "(needed only for the boot console and login screen; changes "
+                 "your boot configuration)",
+            variable=self.boot_method_var,
+            command=self.generate_preview)
+        self.boot_method_check.grid(row=row, column=0, sticky="w",
+                                    padx=5, pady=(6, 0))
 
     # -- preview -------------------------------------------------------------------
 
@@ -254,13 +254,19 @@ class LinuxCRU:
 
         self.preview_text.delete(1.0, tk.END)
         self.preview_text.insert(1.0, header + body)
+        if hasattr(self, "boot_method_check"):
+            self.boot_method_check.state(
+                ["!disabled"] if self.use_edid_method() else ["disabled"])
+
         if self.env.session_type == "x11":
-            status = ("Configuration generated. Use Test Mode to try it, then "
-                      "Apply Configuration to save it.")
-        elif self._wayland_testable():
-            status = "Configuration generated. Use Test Mode to try it."
+            status = ("Method: xrandr and xorg.conf. Use Test Mode to try it, "
+                      "then Apply Configuration to save it.")
+        elif self.use_edid_method():
+            status = ("Method: EDID override (needs root). "
+                      "Use Test Mode to try it.")
         else:
-            status = "Configuration generated. Run the commands shown in the preview."
+            status = (f"Method: {self.env.compositor} (no root needed). "
+                      "Use Test Mode to try it.")
         self.status_var.set(status)
 
     def build_x11_preview(self, out, name, ml):
@@ -299,10 +305,11 @@ class LinuxCRU:
         env = self.env
         w, h, r = self.read_inputs()
 
-        if env.has_nvidia_proprietary:
-            return self._edid_override_notes(out, name, ml,
-                reason="The NVIDIA driver does not accept custom modes from Wayland "
-                       "compositors.")
+        if self.use_edid_method():
+            reason = detect.why_edid_needed(env, self.standard_var.get())
+            return self._edid_override_notes(
+                out, name, ml,
+                reason=f"Using an EDID override because {reason}.")
 
         if env.compositor == "sway":
             return ("# Run now:\n"
@@ -317,40 +324,26 @@ class LinuxCRU:
                     f"monitor = {out}, modeline {ml.timing_string()}, 0x0, 1\n")
 
         if env.compositor == "kwin":
-            if env.kde_custom_modes_available:
-                mhz = int(round(r * 1000))
-                if self.standard_var.get() == "cvt":
-                    blanking, kwin_std = "full", "cvt"
-                else:
-                    blanking, kwin_std = "reduced", "cvt-rb"
-                kwin_ml = timings.calc(w, h, r, kwin_std)
-                lines = [
-                    "# KWin takes only resolution and refresh rate, then computes the\n"
-                    "# timings itself. Run both commands (adding and switching are\n"
-                    "# separate steps):\n",
-                    f"kscreen-doctor output.{out}.addCustomMode.{w}.{h}.{mhz}.{blanking}\n",
-                    f"kscreen-doctor output.{out}.mode.{w}x{h}@{r:g}\n\n",
-                    f"# KWin will generate these timings ({kwin_std.upper()}):\n",
-                    f"# {kwin_ml.xorg_modeline(name)}\n",
-                ]
-                if self.standard_var.get() == "cvt-rb2":
-                    lines.append(
-                        "# KWin cannot generate CVT-RBv2 timings. To use the RBv2\n"
-                        "# timings shown at the top, you need an EDID override.\n")
-                return "".join(lines)
-            return self._edid_override_notes(out, name, ml,
-                reason=f"KDE Plasma "
-                       f"{'.'.join(map(str, env.compositor_version[:2])) or '?'} "
-                       "cannot add custom modes. That needs Plasma 6.6 or newer.")
+            mhz = int(round(r * 1000))
+            blanking = "full" if self.standard_var.get() == "cvt" else "reduced"
+            return ("# KWin takes resolution, refresh rate and a blanking\n"
+                    "# choice, then computes the timings itself. They come out\n"
+                    "# the same as the ones above, because both use libxcvt.\n"
+                    "# Adding a mode and switching to it are separate steps:\n"
+                    f"kscreen-doctor output.{out}.addCustomMode.{w}.{h}.{mhz}.{blanking}\n"
+                    f"kscreen-doctor output.{out}.mode.{w}x{h}@{r:g}\n\n"
+                    "# Test Mode runs both for you and reverts if you do not keep it.\n")
 
         if env.is_wlroots_family:
             return ("# Run now:\n"
                     f"wlr-randr --output {out} --custom-mode {w}x{h}@{r:g}Hz\n\n"
-                    "# The compositor computes CVT full-blanking timings for this.\n"
-                    "# For exact custom timings, use an EDID override.\n")
+                    "# The compositor computes CVT full-blanking timings, which\n"
+                    "# match the ones above.\n")
 
-        return self._edid_override_notes(out, name, ml,
-            reason=f"{env.compositor} cannot add custom modes.")
+        return self._edid_override_notes(
+            out, name, ml,
+            reason=f"Using an EDID override because "
+                   f"{detect.why_edid_needed(env, self.standard_var.get())}.")
 
     def _edid_override_notes(self, out, name, ml, reason):
         conn = self._drm_connector_for(out)
@@ -432,11 +425,10 @@ class LinuxCRU:
     # -- method selection ----------------------------------------------------------
 
     def use_edid_method(self):
-        """True when this environment needs the EDID override backend."""
-        env = self.env
-        if env.session_type == "x11":
+        """True when the timings can only be delivered through the EDID."""
+        if self.env.session_type == "x11":
             return False
-        return not self._wayland_testable()
+        return not detect.compositor_can_apply(self.env, self.standard_var.get())
 
     # -- EDID override backend ------------------------------------------------------
 
@@ -609,11 +601,9 @@ class LinuxCRU:
         self._xrandr('--rmmode', name)
 
     def _wayland_testable(self):
-        env = self.env
-        return (env.session_type == "wayland"
-                and not env.has_nvidia_proprietary
-                and (env.kde_custom_modes_available
-                     or env.compositor in ("sway", "hyprland")))
+        """True when the compositor can apply the selected timings itself."""
+        return (self.env.session_type == "wayland"
+                and detect.compositor_can_apply(self.env, self.standard_var.get()))
 
     def test_mode(self):
         try:
