@@ -19,24 +19,64 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import tempfile
 
-from linux_cru import detect, edid, override, persist, timings, wayland
+from linux_cru import (detect, edid, override, persist, privileged, timings,
+                       wayland)
 
 TEST_REVERT_SECONDS = 15
 
 
-def run_with_sudo(command, work_dir=None):
-    """Run a command as root via pkexec (graphical auth prompt)."""
-    try:
-        process = subprocess.Popen(['pkexec'] + command,
-                                   stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE,
-                                   cwd=work_dir)
-        output, error = process.communicate()
-        if process.returncode == 0:
-            return True, output.decode()
-        return False, error.decode()
-    except Exception as e:
-        return False, str(e)
+class PasswordPrompt:
+    """Modal password dialog, used when no polkit agent is available."""
+
+    def __init__(self, parent, message, retry=False):
+        self.password = None
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("Administrator access required")
+        self.dialog.transient(parent)
+        self.dialog.resizable(False, False)
+        self.dialog.grab_set()
+
+        body = ttk.Frame(self.dialog, padding=12)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(body, text=message, wraplength=320,
+                  justify="left").pack(anchor="w")
+        if retry:
+            ttk.Label(body, text="Incorrect password, try again.",
+                      foreground="#b00000").pack(anchor="w", pady=(6, 0))
+
+        ttk.Label(body, text="Password:").pack(anchor="w", pady=(10, 2))
+        self.entry = ttk.Entry(body, show="•", width=32)
+        self.entry.pack(fill=tk.X)
+
+        buttons = ttk.Frame(body)
+        buttons.pack(fill=tk.X, pady=(12, 0))
+        ttk.Button(buttons, text="Cancel",
+                   command=self.cancel).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text="OK",
+                   command=self.accept).pack(side=tk.RIGHT, padx=(0, 6))
+
+        self.dialog.bind("<Return>", lambda e: self.accept())
+        self.dialog.bind("<Escape>", lambda e: self.cancel())
+        self.dialog.protocol("WM_DELETE_WINDOW", self.cancel)
+
+        parent.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() // 2) - 180
+        y = parent.winfo_rooty() + (parent.winfo_height() // 3)
+        self.dialog.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        self.entry.focus_set()
+
+    def accept(self):
+        self.password = self.entry.get()
+        self.dialog.destroy()
+
+    def cancel(self):
+        self.password = None
+        self.dialog.destroy()
+
+    def run(self):
+        self.dialog.wait_window()
+        return self.password
 
 
 class LinuxCRU:
@@ -439,13 +479,17 @@ class LinuxCRU:
         placement = e.add_mode(ml)
         return e.to_bytes(), placement
 
+    def _ask_password(self, message, retry):
+        return PasswordPrompt(self.root, message, retry).run()
+
     def _run_root_script(self, script, name):
-        """Write `script` to the work dir and run it with pkexec."""
+        """Write `script` to the work dir and run it as root."""
         path = os.path.join(self._work_dir(), name)
         with open(path, "w") as f:
             f.write(script)
         os.chmod(path, 0o755)
-        return run_with_sudo(["/bin/bash", path])
+        return privileged.run_as_root(["/bin/bash", path],
+                                      ask_password=self._ask_password)
 
     def _work_dir(self):
         if not getattr(self, "_workdir_path", None):
@@ -471,13 +515,16 @@ class LinuxCRU:
 
         script = override.build_test_script(card, connector, edid_path,
                                             TEST_REVERT_SECONDS + 10)
-        ok, message = self._run_root_script(script, "test-override.sh")
-        if not ok:
+        result = self._run_root_script(script, "test-override.sh")
+        if result.cancelled:
+            self.status_var.set("Cancelled.")
+            return
+        if not result.ok:
             messagebox.showerror(
                 "Error",
-                f"Could not apply the EDID override:\n{message}\n\n"
-                "This needs root access and a kernel without lockdown "
-                "restrictions on debugfs.")
+                f"Could not apply the EDID override:\n{result.message}\n\n"
+                "This needs root access, and debugfs must not be restricted "
+                "by kernel lockdown.")
             return
 
         self.status_var.set(
@@ -536,11 +583,14 @@ class LinuxCRU:
             f.write(patched)
         os.chmod(edid_path, 0o644)
 
-        ok, message = self._run_root_script(
+        result = self._run_root_script(
             persist.build_install_script(connector, edid_path, method),
             "install.sh")
         self.refresh_remove_button()
-        if ok:
+        if result.cancelled:
+            self.status_var.set("Cancelled.")
+            return
+        if result.ok:
             when = ("It takes effect after a reboot."
                     if method == persist.METHOD_CMDLINE else
                     "It is active now and will be reapplied at every boot.")
@@ -550,7 +600,7 @@ class LinuxCRU:
                 "Use Remove to undo it.")
             self.status_var.set(f"Persistent EDID override installed. {when}")
         else:
-            messagebox.showerror("Error", f"Installation failed:\n{message}")
+            messagebox.showerror("Error", f"Installation failed:\n{result.message}")
 
     def remove_persistent_override(self):
         installed = persist.installed_connectors()
@@ -562,15 +612,18 @@ class LinuxCRU:
                f"all overrides ({', '.join(installed)})"
         if not messagebox.askyesno("Remove", f"Remove {what}?"):
             return
-        ok, message = self._run_root_script(
+        result = self._run_root_script(
             persist.build_uninstall_script(target), "uninstall.sh")
         self.refresh_remove_button()
-        if ok:
+        if result.cancelled:
+            self.status_var.set("Cancelled.")
+            return
+        if result.ok:
             messagebox.showinfo("Removed",
                                 "Removed. It takes effect after a reboot.")
             self.status_var.set("Persistent override removed. Reboot to apply.")
         else:
-            messagebox.showerror("Error", f"Could not remove it:\n{message}")
+            messagebox.showerror("Error", f"Could not remove it:\n{result.message}")
 
     # -- live test (X11) ---------------------------------------------------------
 
@@ -827,14 +880,17 @@ class LinuxCRU:
                     "chmod 644 /etc/X11/xorg.conf.d/10-linux-cru.conf\n")
         os.chmod(script_path, 0o755)
 
-        success, message = run_with_sudo(['/bin/bash', script_path])
+        result = privileged.run_as_root(['/bin/bash', script_path],
+                                        ask_password=self._ask_password)
         try:
             import shutil
             shutil.rmtree(tmp_dir)
         except OSError:
             pass
 
-        if success:
+        if result.cancelled:
+            self.status_var.set("Cancelled.")
+        elif result.ok:
             messagebox.showinfo(
                 "Success",
                 "Configuration saved to /etc/X11/xorg.conf.d/10-linux-cru.conf.\n\n"
@@ -842,7 +898,8 @@ class LinuxCRU:
                 "(log out and back in). To undo, delete that file.")
             self.status_var.set("Configuration applied successfully.")
         else:
-            messagebox.showerror("Error", f"Failed to apply configuration:\n{message}")
+            messagebox.showerror("Error",
+                                 f"Failed to apply configuration:\n{result.message}")
             self.status_var.set("Error: Failed to apply configuration")
 
 
