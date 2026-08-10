@@ -164,10 +164,11 @@ def describe_plan(connector, method=METHOD_SYSTEMD):
     """Human-readable list of what installing will change."""
     steps = [f"Install the EDID to {firmware_path(connector)}"]
     if method == METHOD_SYSTEMD:
-        steps.append(f"Install a boot service ({SYSTEMD_UNIT}) that applies it "
-                     "before the desktop starts")
-        steps.append("Apply it to the running system now")
-        steps.append("Nothing in the boot path is changed")
+        steps.append(f"Install a boot service ({SYSTEMD_UNIT}) that adds the "
+                     "mode to the display's list before the desktop starts")
+        steps.append("Add the mode to the display's list now")
+        steps.append("Your resolution is not changed -- the mode just becomes "
+                     "available to select; nothing in the boot path is changed")
         return steps
 
     boot, boot_detail = detect_bootloader()
@@ -488,11 +489,13 @@ def build_install_script(connector, edid_path, method=METHOD_SYSTEMD,
     """
     if method == METHOD_CMDLINE:
         steps = "update_bootloader\nupdate_initramfs_config"
-        closing = ('echo "Done. The override takes effect after a reboot."')
+        closing = ('echo "Done. After a reboot the mode is in the display\'s '
+                   'list; select it in your display settings."')
     else:
         steps = "update_systemd" + ("\napply_now" if apply_now else "")
-        closing = ('echo "Done. The override is active now and will be '
-                   'reapplied at every boot."')
+        closing = ('echo "Done. The mode is in the display\'s list now and is '
+                   're-added at every boot. Your resolution is not changed -- '
+                   'select the mode in your display settings."')
     return f"""#!/bin/bash
 # linux-cru: install a persistent EDID override for {connector} ({method})
 set -e

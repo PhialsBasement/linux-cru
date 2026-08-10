@@ -279,11 +279,15 @@ def test_detect_and_describe_on_this_machine():
         for s in steps:
             print("    -", s)
     sysd = persist.describe_plan("DP-1", persist.METHOD_SYSTEMD)
-    assert any("Nothing in the boot path" in s for s in sysd), sysd
+    assert any("nothing in the boot path" in s.lower() for s in sysd), sysd
+    # must make clear it does not change the resolution, only offer the mode
+    assert any("not changed" in s or "select" in s for s in sysd), sysd
     cmd = persist.describe_plan("DP-1", persist.METHOD_CMDLINE)
     assert any("kernel command line" in s for s in cmd), cmd
-    assert persist.installed_method() is None, \
-        "this machine should have no override installed"
+    # installed_method reads real system state; just check it returns a
+    # sensible value rather than assuming the machine is clean.
+    assert persist.installed_method() in (None, persist.METHOD_SYSTEMD,
+                                          persist.METHOD_CMDLINE)
 
 
 if __name__ == "__main__":

@@ -808,7 +808,9 @@ class LinuxCRU:
 
         if not messagebox.askyesno(
                 "Make permanent",
-                f"This will apply the mode at every boot:\n\n{steps}\n{warning}\n"
+                "This keeps the mode in the display's list at every boot. It "
+                "does not change your resolution -- you still select the mode "
+                f"yourself in your display settings.\n\n{steps}\n{warning}\n"
                 "Continue?"):
             return
 
@@ -825,14 +827,18 @@ class LinuxCRU:
             self.status_var.set("Cancelled.")
             return
         if result.ok:
-            when = ("It takes effect after a reboot."
-                    if method == persist.METHOD_CMDLINE else
-                    "It is active now and will be reapplied at every boot.")
+            if method == persist.METHOD_CMDLINE:
+                when = ("After a reboot the mode is in the display's list. "
+                        "Select it in your display settings.")
+            else:
+                when = ("The mode is in the display's list now and is re-added "
+                        "at every boot. Select it in your display settings -- "
+                        "your resolution is not changed automatically.")
             messagebox.showinfo(
                 "Installed",
-                f"The mode was added as {placement} and installed.\n\n{when}\n"
+                f"The mode was added to {out}'s EDID as a {placement}.\n\n{when}\n\n"
                 "Use Remove to undo it.")
-            self.status_var.set(f"Persistent EDID override installed. {when}")
+            self.status_var.set("Custom mode installed and kept across reboots.")
         else:
             messagebox.showerror("Error", f"Installation failed:\n{result.message}")
 
@@ -853,9 +859,11 @@ class LinuxCRU:
             self.status_var.set("Cancelled.")
             return
         if result.ok:
-            messagebox.showinfo("Removed",
-                                "Removed. It takes effect after a reboot.")
-            self.status_var.set("Persistent override removed. Reboot to apply.")
+            messagebox.showinfo(
+                "Removed",
+                "Removed. The mode stays in the list until you reboot or "
+                "replug the display.")
+            self.status_var.set("Persistent override removed.")
         else:
             messagebox.showerror("Error", f"Could not remove it:\n{result.message}")
 
