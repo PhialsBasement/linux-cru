@@ -905,7 +905,30 @@ class LinuxCRU:
             self.status_var.set("Error: Failed to apply configuration")
 
 
+def self_test():
+    """Build the whole interface once and exit. Used to check a build."""
+    root = tk.Tk()
+    root.withdraw()
+    gui = LinuxCRU(root)
+    assert gui.preview_text.get("1.0", "end").strip(), "the preview is empty"
+    assert gui.displays, "no displays were listed"
+    for standard in timings.STANDARDS:
+        gui.standard_var.set(standard)
+        gui.generate_preview()
+        assert gui.status_var.get(), f"no status for {standard}"
+    root.destroy()
+    print(f"self-test passed: {gui.env.session_type} session, "
+          f"{gui.env.compositor}, displays: {', '.join(gui.displays)}")
+
+
 def main():
+    if "--self-test" in sys.argv:
+        self_test()
+        return
+    if "--version" in sys.argv:
+        import linux_cru
+        print(f"Linux CRU {linux_cru.__version__}")
+        return
     root = tk.Tk()
     LinuxCRU(root)
     root.mainloop()

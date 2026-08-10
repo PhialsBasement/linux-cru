@@ -53,36 +53,13 @@ jobs:
 
     - name: Verify the AppImage runs
       run: |
-        # The build already checks that the bundled interpreter can
-        # import tkinter. This goes further: extract the AppImage and
-        # start the real application against a virtual display, so a
-        # missing Tcl script directory or library shows up here rather
-        # than on a user's machine.
-        ./Linux_CRU-x86_64.AppImage --appimage-extract > /dev/null
-        cat > /tmp/smoke.py <<'EOF'
-        import sys, tkinter
-        sys.argv = ["linux_cru"]
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "app", "squashfs-root/usr/bin/linux_cru")
-        app = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(app)
-        root = tkinter.Tk()
-        gui = app.LinuxCRU(root)          # builds every widget
-        assert gui.preview_text.get("1.0", "end").strip()
-        root.destroy()
-        print("AppImage smoke test: the interface builds and renders")
-        EOF
-        cp /tmp/smoke.py squashfs-root/usr/bin/smoke.py
-        xvfb-run -a env \
-          PYTHONHOME="$PWD/squashfs-root/usr" \
-          PYTHONPATH="$PWD/squashfs-root/usr/lib/python3.12:$PWD/squashfs-root/usr/lib/python3.12/lib-dynload:$PWD/squashfs-root/usr/bin" \
-          LD_LIBRARY_PATH="$PWD/squashfs-root/usr/lib" \
-          TCL_LIBRARY="$(echo $PWD/squashfs-root/usr/lib/tcl8.6)" \
-          TK_LIBRARY="$(echo $PWD/squashfs-root/usr/lib/tk8.6)" \
-          "$PWD/squashfs-root/usr/bin/python3.12" squashfs-root/usr/bin/smoke.py \
-          || (echo "the packaged application failed to start" && exit 1)
-        rm -rf squashfs-root
+        # Start the packaged application through its own AppRun against
+        # a virtual display, so a missing library or Tcl script
+        # directory shows up here rather than on a user's machine.
+        # Runs with the host's Python hidden, which is the situation the
+        # bundle exists for.
+        xvfb-run -a env -u PYTHONPATH -u PYTHONHOME \
+          ./Linux_CRU-x86_64.AppImage --self-test
 
     - name: Generate new tag
       if: github.event_name != 'pull_request'
