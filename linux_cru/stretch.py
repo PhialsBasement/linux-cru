@@ -167,9 +167,16 @@ def _can_use_sudo():
 def build_live_patch_script(value="full"):
     """A root script that flips the running KWin's scaling static.
 
-    It re-derives the addresses from the byte signature every run, and
-    verifies the live code matches the on-disk library before writing,
-    so it cannot corrupt a KWin it does not recognise.
+    HACK!!: Replace as soon as KWin gets off their high horse about
+    non-laptop panels scaling on Wayland. This pokes the running
+    compositor's memory to force the DRM scaling mode because KWin gates
+    the scaler on isInternal(); if upstream ever sets it for external
+    outputs (or honours a config option), delete this whole path.
+
+    It re-derives the addresses from the byte signature in the process's
+    own memory every run, so it needs no on-disk library and does
+    nothing if the signature is gone -- it cannot corrupt a KWin it does
+    not recognise.
     """
     enum = VALUES.get(value.lower(), 1)
     return f'''#!/usr/bin/env python3

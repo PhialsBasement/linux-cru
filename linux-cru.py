@@ -40,7 +40,7 @@ class PasswordPrompt:
         body = ttk.Frame(self.dialog, padding=12)
         body.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(body, text=message, wraplength=320,
+        ttk.Label(body, text=message, wraplength=360,
                   justify="left").pack(anchor="w")
         if retry:
             ttk.Label(body, text="Incorrect password, try again.",
@@ -1019,19 +1019,31 @@ class LinuxCRU:
             keep_status="Mode applied for this session. To keep it permanently, "
                         "add the line from the preview to your compositor config.")
 
+    @staticmethod
+    def _center_dialog(dialog):
+        """Size the window to its content and centre it on the parent."""
+        dialog.update_idletasks()
+        w = dialog.winfo_reqwidth()
+        h = dialog.winfo_reqheight()
+        parent = dialog.master
+        x = parent.winfo_rootx() + (parent.winfo_width() - w) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - h) // 3
+        dialog.geometry(f"{w}x{h}+{max(x, 0)}+{max(y, 0)}")
+
     def _show_revert_dialog(self, out, on_revert, keep_status,
                             on_keep=None, message=None):
         dialog = tk.Toplevel(self.root)
         dialog.title("Testing mode")
-        dialog.geometry("460x190")
         dialog.transient(self.root)
+        dialog.resizable(False, False)
         dialog.grab_set()
         dialog.protocol("WM_DELETE_WINDOW", lambda: None)
 
         remaining = tk.IntVar(value=TEST_REVERT_SECONDS)
-        label = ttk.Label(dialog, justify="center",
-                          text="")
-        label.pack(pady=12)
+        # wrap the text and let the window size to fit it, rather than
+        # forcing a width that clips longer messages
+        label = ttk.Label(dialog, justify="center", wraplength=440, text="")
+        label.pack(padx=16, pady=12)
 
         state = {"done": False}
 
@@ -1068,13 +1080,14 @@ class LinuxCRU:
             dialog.after(1000, tick)
 
         btns = ttk.Frame(dialog)
-        btns.pack(pady=6)
+        btns.pack(pady=(0, 12))
         keep_btn = ttk.Button(btns, text="Keep", command=keep)
         keep_btn.pack(side=tk.LEFT, padx=8)
         ttk.Button(btns, text="Revert now", command=revert).pack(side=tk.LEFT, padx=8)
         dialog.bind('<Return>', lambda e: keep())
         keep_btn.focus()
         tick()
+        self._center_dialog(dialog)
 
     # -- persist (X11) -------------------------------------------------------------
 
