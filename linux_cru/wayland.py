@@ -10,6 +10,7 @@ they never raise on tool failure.
 import json
 import re
 import subprocess
+import time
 
 from . import hostenv
 
@@ -26,6 +27,87 @@ def _run(cmd):
             stdout = ""
             stderr = str(e)
         return _Failed()
+
+
+# -- switching to a mode, whatever is running --------------------------------
+
+def kernel_has_mode(card, connector, width, height):
+    """True once the kernel lists the resolution for this connector.
+
+    The compositor cannot switch to a mode it has not seen yet, and an
+    EDID override only takes effect on the next detect, so this is the
+    gate to wait on before trying.
+    """
+    try:
+        with open(f"/sys/class/drm/{card}-{connector}/modes") as f:
+            return f"{width}x{height}" in f.read().split()
+    except OSError:
+        return False
+
+
+def wait_for_mode(card, connector, width, height, timeout=6.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if kernel_has_mode(card, connector, width, height):
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def set_mode(env, output, width, height, refresh):
+    """Switch `output` to this mode. Returns (ok, message)."""
+    session = env.session_type
+    compositor = env.compositor
+
+    if session == "x11":
+        res = _run(["xrandr", "--output", output, "--mode",
+                    f"{width}x{height}", "--rate", f"{refresh:g}"])
+        return res.returncode == 0, (res.stderr or res.stdout)
+
+    if compositor == "kwin":
+        return kwin_set_mode(output, f"{width}x{height}@{refresh:g}")
+
+    if compositor == "sway":
+        return sway_set_mode(output, width, height, refresh)
+
+    if compositor == "hyprland":
+        return hyprland_set_mode(output, width, height, refresh)
+
+    if compositor == "mutter":
+        return gnome_set_mode(env, output, width, height, refresh)
+
+    if env.is_wlroots_family:
+        res = _run(["wlr-randr", "--output", output, "--mode",
+                    f"{width}x{height}@{refresh:g}Hz"])
+        return res.returncode == 0, (res.stderr or res.stdout)
+
+    return False, f"no way to change the mode on {compositor}"
+
+
+def gnome_set_mode(env, output, width, height, refresh):
+    """GNOME, through gdctl (shipped with Mutter since GNOME 48).
+
+    gdctl replaces the whole monitor layout, so with more than one
+    display connected this would rearrange the others. Refuse rather
+    than wreck someone's desk setup.
+    """
+    connected = [c for c in env.connectors if c.status == "connected"]
+    if len(connected) > 1:
+        return False, ("gdctl rewrites the whole monitor layout, so this tool "
+                       "will not switch modes automatically with more than one "
+                       "display connected. The mode has been added -- select it "
+                       "in Settings > Displays.")
+    res = _run(["gdctl", "set", "--logical-monitor", "--primary",
+                "--monitor", output, "--mode",
+                f"{width}x{height}@{refresh:.3f}"])
+    if res.returncode == 0:
+        return True, ""
+    # Older GNOME has no gdctl.
+    if "not found" in (res.stderr or "").lower():
+        return False, ("gdctl is not available (it ships with GNOME 48 and "
+                       "later). The mode has been added -- select it in "
+                       "Settings > Displays.")
+    return False, (res.stderr or res.stdout)
 
 
 # -- KDE / kscreen-doctor ----------------------------------------------------

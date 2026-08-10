@@ -88,6 +88,39 @@ def test_dtd_limits():
         raise AssertionError("expected EdidError for pclk over DTD limit")
 
 
+def test_dtd_carries_the_real_physical_size():
+    """Bytes 12-14 are the picture size in millimetres, which displays use
+    for DPI and scaling. Deriving them from the pixel count (what CRU
+    does) tells a 700x390 mm panel its picture is 480x270 mm."""
+    e = make_base_edid()
+    e.data[21], e.data[22] = 70, 39          # 70 x 39 cm panel
+    e.fix_checksums()
+    e.add_mode(timings.calc(1920, 1080, 60, "cvt-rb2"))
+    dtd = e.data[54:72]
+    width_mm = dtd[12] | ((dtd[14] & 0xF0) << 4)
+    height_mm = dtd[13] | ((dtd[14] & 0x0F) << 8)
+    assert (width_mm, height_mm) == (700, 390), (width_mm, height_mm)
+
+    # No size stated: fall back rather than claim 0x0.
+    e2 = make_base_edid()
+    e2.add_mode(timings.calc(1920, 1080, 60, "cvt-rb2"))
+    dtd = e2.data[54:72]
+    assert dtd[12] or dtd[13], "a zero physical size would be worse"
+
+
+def test_patching_adds_no_conformance_failures():
+    if not shutil.which("edid-decode"):
+        print("edid-decode not installed - skipping")
+        return
+    e = make_base_edid()
+    e.data[21], e.data[22] = 70, 39
+    e.fix_checksums()
+    before = _edid_decode(e.to_bytes()).count("Mismatch of image size")
+    e.add_mode(timings.calc(1920, 1080, 60, "cvt-rb2"))
+    after = _edid_decode(e.to_bytes()).count("Mismatch of image size")
+    assert after == before == 0, f"image size mismatches: {before} -> {after}"
+
+
 def test_add_small_mode_uses_base_slot():
     e = make_base_edid()
     ml = timings.calc(1920, 1080, 75, "cvt-rb2")

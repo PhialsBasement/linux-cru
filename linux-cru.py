@@ -11,6 +11,7 @@ the kernel EDID-override backend is the next milestone.
 import os
 import subprocess
 import sys
+import time
 import tkinter as tk
 from datetime import datetime
 from tkinter import ttk, messagebox
@@ -552,6 +553,7 @@ class LinuxCRU:
         conn = self._drm_connector_for(out)
         card = conn.partition("-")[0]
         connector = self._strip_card(conn)
+        w, h, r = self.read_inputs()
 
         try:
             patched, placement = self._build_patched_edid(out, ml)
@@ -564,8 +566,10 @@ class LinuxCRU:
             f.write(patched)
         os.chmod(edid_path, 0o644)
 
+        previous = detect.current_mode(self.env, out)
+
         script = override.build_test_script(card, connector, edid_path,
-                                            TEST_REVERT_SECONDS + 10)
+                                            TEST_REVERT_SECONDS + 20)
         result = self._run_root_script(script, "test-override.sh")
         if result.cancelled:
             self.status_var.set("Cancelled.")
@@ -578,27 +582,64 @@ class LinuxCRU:
                 "by kernel lockdown.")
             return
 
-        self.status_var.set(
-            f"EDID override active. The new mode was added as {placement} and "
-            f"should now appear in your display settings.")
-
-        def revert():
+        def remove_override():
             self._run_root_script(override.build_revert_script(card, connector),
                                   "revert-override.sh")
+
+        # The mode only exists once the kernel has re-read the EDID.
+        if not wayland.wait_for_mode(card, connector, w, h):
+            remove_override()
+            messagebox.showerror(
+                "Error",
+                f"The kernel did not pick up {w}x{h} after the EDID was "
+                "applied.\n\nThe driver most likely rejected it: the pixel "
+                "clock may be beyond what the connection can carry. Check "
+                "dmesg.")
+            return
+
+        ok, message = wayland.set_mode(self.env, out, w, h, r)
+        if not ok:
+            # The mode is there, we just cannot select it from here.
+            self.status_var.set(f"Mode added to {out}, but it could not be "
+                                f"selected automatically.")
+            keep = messagebox.askyesno(
+                "Added, but not applied",
+                f"{w}x{h} at {r:g} Hz was added to {out}, but this tool could "
+                f"not switch to it:\n\n{message}\n\nKeep the mode available "
+                f"so you can select it yourself?")
+            if keep:
+                self._run_root_script(
+                    f"#!/bin/bash\ntouch '{override.keep_flag_path(connector)}'\n",
+                    "keep-override.sh")
+                self.status_var.set("Mode kept for this session.")
+            else:
+                remove_override()
+                self.status_var.set("Reverted.")
+            return
+
+        def revert():
+            # Order matters: leave the custom mode before taking away the
+            # EDID that defines it, or the output is left on a mode that
+            # no longer exists.
+            if previous:
+                pw, ph, pr = previous
+                wayland.set_mode(self.env, out, pw, ph, pr)
+                time.sleep(1.0)
+            remove_override()
 
         def keep():
             self._run_root_script(
                 f"#!/bin/bash\ntouch '{override.keep_flag_path(connector)}'\n",
                 "keep-override.sh")
 
+        self.status_var.set(f"Testing {w}x{h} at {r:g} Hz on {out}.")
         self._show_revert_dialog(
             out, revert,
-            keep_status="Override kept for this session. Use Apply Configuration "
+            keep_status="Mode kept for this session. Use Apply Configuration "
                         "to keep it after a reboot.",
             on_keep=keep,
-            message=(f"The mode was added to {out} and the display was "
-                     f"re-detected.\n\nSelect it in your display settings to "
-                     f"try it."))
+            message=f"{out} is now running at {w}x{h}, {r:g} Hz\n"
+                    f"(added to the EDID as {placement}).")
 
     def _apply_edid_override(self, out, ml):
         conn = self._drm_connector_for(out)

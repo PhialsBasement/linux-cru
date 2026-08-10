@@ -182,7 +182,7 @@ class Edid:
     # -- DTD encode/decode -----------------------------------------------------
 
     @staticmethod
-    def encode_dtd(ml: Modeline) -> bytes:
+    def encode_dtd(ml: Modeline, width_mm: int = 0, height_mm: int = 0) -> bytes:
         pclk = int(round(ml.clock_khz / 10.0))
         h_front = ml.hsync_start - ml.hdisplay
         h_sync = ml.hsync_end - ml.hsync_start
@@ -199,10 +199,14 @@ class Edid:
                 or v_front > DTD_MAX_VFRONT or v_sync > DTD_MAX_VSYNC:
             raise EdidError("timing values do not fit the DTD field limits")
 
-        # Image size bytes 12-14: like CRU, fake an aspect-correct size
-        # from the pixel counts (active/4 "mm").
-        img_h = ml.hdisplay // 4
-        img_v = ml.vdisplay // 4
+        # Bytes 12-14 are the physical size of the picture in millimetres,
+        # which is what a display uses to work out DPI and how to scale.
+        # CRU writes active/4 here instead, which claims a 1920x1080 mode
+        # is 480x270 mm whatever panel it is on. Use the real size from
+        # the base block, and only fall back to the pixel-derived number
+        # when the display does not state one.
+        img_h = width_mm or ml.hdisplay // 4
+        img_v = height_mm or ml.vdisplay // 4
 
         d = bytearray(18)
         d[0] = pclk & 0xFF
@@ -470,11 +474,15 @@ class Edid:
         except EdidError:
             return False
 
+    def physical_size_mm(self):
+        """(width, height) of the panel in mm, or (0, 0) if not stated."""
+        return self.data[21] * 10, self.data[22] * 10
+
     def add_mode(self, ml: Modeline):
         """Add a timing; returns where it was placed
         ("base-dtd" / "cta-dtd" / "displayid")."""
         if self.fits_dtd(ml):
-            dtd = self.encode_dtd(ml)
+            dtd = self.encode_dtd(ml, *self.physical_size_mm())
             offset = self.free_base_slot()
             if offset is not None:
                 self.data[offset:offset + 18] = dtd
