@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tempfile
 
 from linux_cru import (detect, edid, hostenv, override, persist, privileged,
-                       timings, wayland)
+                       stretched, timings, wayland)
 
 TEST_REVERT_SECONDS = 15
 
@@ -305,6 +305,9 @@ class LinuxCRU:
                   f"{ml.actual_refresh:.3f} Hz actual "
                   f"({self.standard_var.get().upper()})\n"
                   f"# {ml.xorg_modeline(name)}\n\n")
+        note = self.stretched_note(ml)
+        if note:
+            header += note + "\n"
         warning = self.limits_warning(ml)
         if warning:
             header += warning + "\n"
@@ -332,6 +335,28 @@ class LinuxCRU:
             status = (f"Method: {self.env.compositor} (no root needed). "
                       "Use Test Mode to try it.")
         self.status_var.set(status)
+
+    def native_resolution(self):
+        """Largest mode the display advertises, i.e. its panel resolution."""
+        try:
+            modes = edid.Edid.from_connector(
+                self._drm_connector_for(self.display_var.get())).list_modes()
+        except edid.EdidError:
+            return (0, 0)
+        if not modes:
+            return (0, 0)
+        best = max(modes, key=lambda m: m.width * m.height)
+        return best.width, best.height
+
+    def stretched_note(self, ml):
+        nw, nh = self.native_resolution()
+        if not nw:
+            return ""
+        try:
+            w, h, r = self.read_inputs()
+        except ValueError:
+            return ""
+        return stretched.describe(nw, nh, w, h, r)
 
     def limits_warning(self, ml):
         """Note anything the display says it cannot do. Not a refusal:
