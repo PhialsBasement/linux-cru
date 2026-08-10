@@ -23,6 +23,31 @@ def test_detect_runs_and_is_coherent():
     assert isinstance(text, str) and len(text) > 20
 
 
+def test_unusable_modes_are_rejected():
+    """Virtual displays report 0 Hz; accepting that breaks every calculation."""
+    env = detect.Environment(session_type="x11", compositor="x11")
+    xvfb_output = (
+        "Screen 0: minimum 1 x 1, current 1280 x 1024, maximum 8192 x 8192\n"
+        "default connected 1280x1024+0+0 0mm x 0mm\n"
+        "   1280x1024      0.00*\n")
+    real = detect._run
+    detect._run = lambda cmd: xvfb_output
+    try:
+        assert detect.current_mode(env, "default") is None, \
+            "a 0 Hz mode must not be reported as usable"
+    finally:
+        detect._run = real
+
+    good = ("Screen 0: minimum 320 x 200\n"
+            "DP-1 connected primary 2560x1440+0+0 597mm x 336mm\n"
+            "   2560x1440    143.91*+  120.00\n")
+    detect._run = lambda cmd: good
+    try:
+        assert detect.current_mode(env, "DP-1") == (2560, 1440, 143.91)
+    finally:
+        detect._run = real
+
+
 def test_version_tuple():
     assert detect._version_tuple("plasmashell 6.6.1") == (6, 6, 1)
     assert detect._version_tuple("Hyprland 0.53.2 built from...") == (0, 53, 2)

@@ -270,23 +270,33 @@ def why_edid_needed(env: Environment, standard: str) -> str:
 def current_mode(env: Environment, output: str):
     """(width, height, refresh) active on `output`, or None if unknown.
 
-    Uses xrandr on X11 and the compositor's own CLI on Wayland.
+    Uses xrandr on X11 and the compositor's own CLI on Wayland. A mode
+    is only returned if it is usable: virtual displays (Xvfb, some
+    virtual machines) report a refresh rate of 0, and feeding that back
+    into the interface leaves it unable to calculate anything.
     """
+    mode = None
     try:
         if env.session_type == "x11":
-            return _current_mode_xrandr(output)
-        if env.session_type == "wayland":
+            mode = _current_mode_xrandr(output)
+        elif env.session_type == "wayland":
             if env.compositor == "kwin":
-                return _current_mode_kscreen(output)
-            if env.compositor == "sway":
-                return _current_mode_sway(output)
-            if env.compositor == "hyprland":
-                return _current_mode_hyprland(output)
-            if env.is_wlroots_family:
-                return _current_mode_wlr_randr(output)
+                mode = _current_mode_kscreen(output)
+            elif env.compositor == "sway":
+                mode = _current_mode_sway(output)
+            elif env.compositor == "hyprland":
+                mode = _current_mode_hyprland(output)
+            elif env.is_wlroots_family:
+                mode = _current_mode_wlr_randr(output)
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
-        pass
-    return None
+        return None
+
+    if not mode:
+        return None
+    width, height, refresh = mode
+    if width <= 0 or height <= 0 or refresh <= 0:
+        return None
+    return mode
 
 
 def _current_mode_xrandr(output):
