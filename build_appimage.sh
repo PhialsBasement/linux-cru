@@ -1,5 +1,12 @@
 #!/bin/bash
-# build_appimage.sh - Main script to build the AppImage for Arch Linux
+# build_appimage.sh - Fixed script to build the AppImage for Linux
+
+# Get Python version
+PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+PYTHON_LIB_PATH="/usr/lib/python${PYTHON_VERSION}"
+
+echo "Using Python ${PYTHON_VERSION}"
+echo "Python lib path: ${PYTHON_LIB_PATH}"
 
 # First check for the Python script
 echo "Checking for linux-cru.py..."
@@ -9,7 +16,7 @@ if [ ! -f "linux-cru.py" ]; then
 fi
 
 # Create directory structure
-mkdir -p linux_cru.AppDir/{usr/{bin,share/{applications,icons/hicolor/{16x16,32x32,48x48,64x64,128x128,256x256,512x512,scalable}/apps},lib/python3/dist-packages},etc}
+mkdir -p linux_cru.AppDir/usr/{bin,lib/python${PYTHON_VERSION},share/{applications,icons/hicolor/{16x16,32x32,48x48,64x64,128x128,256x256,512x512,scalable}/apps}}
 
 # Copy your script
 cp linux-cru.py linux_cru.AppDir/usr/bin/linux_cru
@@ -29,7 +36,7 @@ EOF
 # Create desktop entry symlink
 cp linux_cru.AppDir/usr/share/applications/linux_cru.desktop linux_cru.AppDir/
 
-# Create SVG icon
+# Create SVG icon (same as original)
 cat > linux_cru.AppDir/usr/share/icons/hicolor/scalable/apps/linux_cru.svg << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
@@ -63,28 +70,79 @@ done
 # Copy the main icon to root for AppImage
 cp linux_cru.AppDir/usr/share/icons/hicolor/256x256/apps/linux_cru.png linux_cru.AppDir/linux_cru.png
 
-# Create AppRun script
-cat > linux_cru.AppDir/AppRun << 'EOF'
+# Create AppRun script with proper Python paths
+cat > linux_cru.AppDir/AppRun << EOF
 #!/bin/bash
-HERE="$(dirname "$(readlink -f "${0}")")"
-export PATH="${HERE}/usr/bin:${PATH}"
-export PYTHONPATH="${HERE}/usr/lib/python3/dist-packages:${PYTHONPATH}"
-export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
-export TCL_LIBRARY="${HERE}/usr/lib/tcl8.6"
-export TK_LIBRARY="${HERE}/usr/lib/tk8.6"
+HERE="\$(dirname "\$(readlink -f "\${0}")")"
+export PATH="\${HERE}/usr/bin:\${PATH}"
+export PYTHONPATH="\${HERE}/usr/lib/python${PYTHON_VERSION}:\${HERE}/usr/lib/python${PYTHON_VERSION}/lib-dynload:\${PYTHONPATH}"
+export LD_LIBRARY_PATH="\${HERE}/usr/lib:\${LD_LIBRARY_PATH}"
+export TCL_LIBRARY="\${HERE}/usr/lib/tcl8.6"
+export TK_LIBRARY="\${HERE}/usr/lib/tk8.6"
 
 # Execute the main application
-exec "${HERE}/usr/bin/linux_cru" "$@"
+exec "\${HERE}/usr/bin/python${PYTHON_VERSION}" "\${HERE}/usr/bin/linux_cru" "\$@"
 EOF
 chmod +x linux_cru.AppDir/AppRun
 
-# Copy required system libraries
-cp -r /usr/lib/x86_64-linux-gnu/{libtk8.6.so,libtcl8.6.so} linux_cru.AppDir/usr/lib/
-cp -r /usr/lib/tcl8.6 linux_cru.AppDir/usr/lib/
-cp -r /usr/lib/tk8.6 linux_cru.AppDir/usr/lib/
+# Copy Python interpreter
+cp /usr/bin/python${PYTHON_VERSION} linux_cru.AppDir/usr/bin/
 
-# Copy Python standard library
-cp -r /usr/lib/python3/dist-packages/* linux_cru.AppDir/usr/lib/python3/dist-packages/
+# Copy essential Python standard library including tkinter
+echo "Copying Python standard library..."
+if [ -d "${PYTHON_LIB_PATH}" ]; then
+    cp -r "${PYTHON_LIB_PATH}"/* linux_cru.AppDir/usr/lib/python${PYTHON_VERSION}/
+else
+    echo "Warning: Python library path ${PYTHON_LIB_PATH} not found"
+fi
+
+# Copy tkinter-specific libraries
+echo "Copying tkinter libraries..."
+# Find and copy tkinter dynamic libraries
+find /usr/lib/x86_64-linux-gnu -name "*tk*" -o -name "*tcl*" | while read lib; do
+    if [ -f "$lib" ]; then
+        cp "$lib" linux_cru.AppDir/usr/lib/ 2>/dev/null || true
+    fi
+done
+
+# Copy additional required libraries
+libs_to_copy=(
+    "libtk8.6.so*"
+    "libtcl8.6.so*"
+    "libX11.so*"
+    "libXext.so*"
+    "libXft.so*"
+    "libfontconfig.so*"
+    "libfreetype.so*"
+    "libXrender.so*"
+    "libexpat.so*"
+    "libuuid.so*"
+    "libpng16.so*"
+    "libz.so*"
+    "libbz2.so*"
+    "liblzma.so*"
+)
+
+for lib_pattern in "${libs_to_copy[@]}"; do
+    find /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu -name "$lib_pattern" 2>/dev/null | while read lib; do
+        if [ -f "$lib" ]; then
+            cp "$lib" linux_cru.AppDir/usr/lib/ 2>/dev/null || true
+        fi
+    done
+done
+
+# Copy tcl/tk library directories
+if [ -d "/usr/lib/tcl8.6" ]; then
+    cp -r /usr/lib/tcl8.6 linux_cru.AppDir/usr/lib/
+fi
+if [ -d "/usr/lib/tk8.6" ]; then
+    cp -r /usr/lib/tk8.6 linux_cru.AppDir/usr/lib/
+fi
+
+# Copy any additional site-packages
+if [ -d "/usr/lib/python${PYTHON_VERSION}/dist-packages" ]; then
+    cp -r /usr/lib/python${PYTHON_VERSION}/dist-packages/* linux_cru.AppDir/usr/lib/python${PYTHON_VERSION}/ 2>/dev/null || true
+fi
 
 # Download appimagetool if not already present
 if [ ! -f "appimagetool-x86_64.AppImage" ]; then
@@ -95,7 +153,6 @@ fi
 
 # Build the AppImage
 echo "Building AppImage..."
-chmod +x linux_cru.AppDir/AppRun
 ARCH=x86_64 ./appimagetool-x86_64.AppImage linux_cru.AppDir Linux_CRU-x86_64.AppImage
 
 if [ ! -f "Linux_CRU-x86_64.AppImage" ]; then
@@ -105,3 +162,4 @@ fi
 
 chmod +x Linux_CRU-x86_64.AppImage
 echo "AppImage created successfully: Linux_CRU-x86_64.AppImage"
+echo "Size: $(du -h Linux_CRU-x86_64.AppImage | cut -f1)"

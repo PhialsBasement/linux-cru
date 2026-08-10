@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+linux_cru.AppDir/
+appimagetool-x86_64.AppImage
+Linux_CRU-x86_64.AppImage

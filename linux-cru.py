@@ -144,7 +144,10 @@ class LinuxCRU:
                                    state="readonly")
         display_combo.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
         display_frame.grid_columnconfigure(0, weight=1)
-        
+
+        # Refresh button to get current resolution
+        ttk.Button(display_frame, text="Get Current Settings", command=self.get_current_resolution).grid(row=0, column=1, padx=5, pady=5)
+
         display_combo.bind('<<ComboboxSelected>>', lambda e: self.generate_preview())
 
     def create_resolution_section(self):
@@ -171,6 +174,21 @@ class LinuxCRU:
         ttk.Label(res_frame, text="pixels").grid(row=0, column=2, sticky="w", padx=5)
         ttk.Label(res_frame, text="pixels").grid(row=1, column=2, sticky="w", padx=5)
         ttk.Label(res_frame, text="Hz").grid(row=2, column=2, sticky="w", padx=5)
+
+    def get_current_resolution(self):
+        """Get current resolution and refresh rate of the selected display"""
+        try:
+            display = self.display_var.get()
+            output = subprocess.check_output(['xrandr', '--verbose'], universal_newlines=True)
+            for line in output.splitlines():
+                if display in line and "*current" in line:
+                    match = re.search(r'(\d+)x(\d+).*?([\d\.]+)\*', line)
+                    if match:
+                        self.width_var.set(match.group(1))
+                        self.height_var.set(match.group(2))
+                        self.refresh_var.set(match.group(3))
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to get current resolution: {str(e)}")
 
     def create_advanced_section(self):
         adv_frame = ttk.LabelFrame(self.main_frame, text="Advanced Settings", padding=5)
@@ -381,16 +399,27 @@ options nvidia NVreg_RegistryDwords="CustomEDID={mode_name};EnableBrightnessCont
             with open(script_path, 'w') as f:
                 f.write("""#!/bin/bash
 set -e
+mkdir -p /etc/X11/xorg.conf.d
 cp "${1}/xorg.conf" /etc/X11/xorg.conf.d/10-custom-modes.conf
 cp "${1}/nvidia.conf" /etc/modprobe.d/nvidia.conf
 chmod 644 /etc/X11/xorg.conf.d/10-custom-modes.conf
 chmod 644 /etc/modprobe.d/nvidia.conf
-mkinitcpio -P
+
+# Check for mkinitcpio or dracut and update initramfs
+if command -v mkinitcpio >/dev/null 2>&1; then
+    mkinitcpio -P
+elif command -v dracut >/dev/null 2>&1; then
+    dracut --force
+elif command -v update-initramfs >/dev/null 2>&1; then
+    update-initramfs -u
+else
+    echo "Warning: Could not find mkinitcpio, dracut, or update-initramfs. Initramfs not updated."
+fi
 """)
             os.chmod(script_path, 0o755)
-            
+
             # Run helper script with sudo
-            success, message = run_with_sudo([script_path, tmp_dir])
+            success, message = run_with_sudo(['/bin/bash', script_path, tmp_dir])
             
             # Cleanup temporary files
             try:
