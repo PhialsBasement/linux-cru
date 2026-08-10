@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tempfile
 
 from linux_cru import (detect, edid, hostenv, override, persist, privileged,
-                       timings, wayland)
+                       stretch, timings, wayland)
 
 TEST_REVERT_SECONDS = 15
 
@@ -84,8 +84,8 @@ class LinuxCRU:
     def __init__(self, root):
         self.root = root
         self.root.title("Linux Custom Resolution Utility")
-        self.root.geometry("860x780")
-        self.root.minsize(640, 560)
+        self.root.geometry("860x980")
+        self.root.minsize(640, 720)
         self.root.grid_columnconfigure(0, weight=1)
         self.root.grid_rowconfigure(0, weight=1)
 
@@ -94,12 +94,13 @@ class LinuxCRU:
         self.main_frame = ttk.Frame(root, padding="10")
         self.main_frame.grid(row=0, column=0, sticky="nsew")
         self.main_frame.grid_columnconfigure(0, weight=1)
-        self.main_frame.grid_rowconfigure(4, weight=1)  # preview grows
+        self.main_frame.grid_rowconfigure(5, weight=1)  # preview grows
 
         self.create_environment_section()
         self.create_display_section()
         self.create_resolution_section()
         self.create_timing_section()
+        self.create_stretch_section()
         self.create_preview_section()
         self.create_action_section()
 
@@ -272,15 +273,127 @@ class LinuxCRU:
         self.boot_method_check.grid(row=row, column=0, sticky="w",
                                     padx=5, pady=(6, 0))
 
+    # -- stretch (KWin) ------------------------------------------------------------
+
+    def create_stretch_section(self):
+        """Scaling behaviour for a resolution smaller than the panel.
+
+        Only built on KWin, which is the compositor that refuses external
+        GPU scaling by default and the one this can override.
+        """
+        self.stretch_mode_var = tk.StringVar(value="off")
+        if self.env.compositor != "kwin":
+            return
+
+        frame = ttk.LabelFrame(self.main_frame,
+                               text="Stretch to fill the screen (KWin)", padding=5)
+        frame.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        frame.grid_columnconfigure(0, weight=1)
+
+        options = [
+            ("Don't force scaling (KWin only scales on laptop panels)", "off"),
+            ("Stretch to fill (distorts aspect; for stretched-res gaming)", "full"),
+            ("Fill keeping aspect (scales up, may add black bars)", "full_aspect"),
+        ]
+        for i, (label, value) in enumerate(options):
+            ttk.Radiobutton(frame, text=label, variable=self.stretch_mode_var,
+                            value=value).grid(row=i, column=0, sticky="w", padx=5)
+
+        btn_row = ttk.Frame(frame)
+        btn_row.grid(row=len(options), column=0, sticky="w", padx=5, pady=(6, 0))
+        ttk.Button(btn_row, text="Apply",
+                   command=self.apply_stretch).pack(side=tk.LEFT)
+        # Only meaningful once something is saved; shown/hidden by refresh.
+        self.stretch_revert_btn = ttk.Button(btn_row, text="Revert now",
+                                             command=self.revert_stretch)
+
+        self.stretch_status_var = tk.StringVar()
+        ttk.Label(frame, textvariable=self.stretch_status_var, wraplength=760,
+                  foreground="#555555").grid(row=len(options) + 1, column=0,
+                                             sticky="w", padx=5, pady=(4, 0))
+        self.refresh_stretch_status()
+
+    def refresh_stretch_status(self):
+        if self.env.compositor != "kwin":
+            return
+        saved = stretch.persistent_value()
+        if saved:
+            self.stretch_revert_btn.pack(side=tk.LEFT, padx=(6, 0))
+            self.stretch_status_var.set(
+                f"Saved across reboots: {saved}. Apply takes effect now; "
+                "the saved setting also applies at every login. Revert now "
+                "turns it off and removes the saved setting.")
+        else:
+            self.stretch_revert_btn.pack_forget()
+            self.stretch_status_var.set(
+                "Apply takes effect immediately (needs root); it is lost when "
+                "you log out unless you keep it.")
+
+    def revert_stretch(self):
+        result = self._run_root_script(stretch.build_live_patch_script("none"),
+                                       "stretch-live.py",
+                                       interpreter="/usr/bin/python3")
+        if result.cancelled:
+            self.status_var.set("Cancelled.")
+            return
+        stretch.remove_persistent()
+        self.stretch_mode_var.set("off")
+        self.refresh_stretch_status()
+        self.status_var.set("Stretch turned off and the saved setting removed."
+                            if result.ok else
+                            "Saved setting removed; could not change the live "
+                            "session: " + result.message)
+
+    def apply_stretch(self):
+        value = self.stretch_mode_var.get()          # off / full / full_aspect
+
+        # Apply to the running session first (live poke, no restart).
+        script = stretch.build_live_patch_script(
+            "none" if value == "off" else value)
+        result = self._run_root_script(script, "stretch-live.py",
+                                       interpreter="/usr/bin/python3")
+        if result.cancelled:
+            self.status_var.set("Cancelled.")
+            return
+        if not result.ok:
+            messagebox.showerror(
+                "Error",
+                f"Could not apply the live stretch:\n{result.message}\n\n"
+                "This pokes the running KWin's memory and needs root. If KWin "
+                "was updated the signature may need refreshing.")
+            return
+
+        if value == "off":
+            stretch.remove_persistent()
+            self.refresh_stretch_status()
+            self.status_var.set("Stretch turned off.")
+            return
+
+        self.status_var.set("Stretch is active now. Set a smaller resolution "
+                            "and it will fill the screen.")
+
+        # Offer to keep it. Without this it is gone at the next logout.
+        keep = messagebox.askyesno(
+            "Keep the setting?",
+            "Keep this scaling setting as a systemd service?\n\n"
+            "It will be lost when you log out if you don't. Keeping it makes "
+            "it apply at every login from now on.")
+        if keep:
+            stretch.write_persistent(value.upper())
+            self.status_var.set("Stretch active now and kept for future logins.")
+        else:
+            stretch.remove_persistent()
+        self.refresh_stretch_status()
+
     # -- preview -------------------------------------------------------------------
 
     def create_preview_section(self):
         frame = ttk.LabelFrame(self.main_frame, text="Configuration Preview", padding=5)
-        frame.grid(row=4, column=0, sticky="nsew", pady=(0, 10))
+        frame.grid(row=5, column=0, sticky="nsew", pady=(0, 10))
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(0, weight=1)
 
-        self.preview_text = tk.Text(frame, height=14, wrap=tk.NONE)
+        self.preview_text = tk.Text(frame, height=12, width=80, wrap=tk.NONE)
         self.preview_text.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         y = ttk.Scrollbar(frame, orient="vertical", command=self.preview_text.yview)
         y.grid(row=0, column=1, sticky="ns")
@@ -440,36 +553,65 @@ class LinuxCRU:
     def _edid_override_notes(self, out, name, ml, reason):
         conn = self._drm_connector_for(out)
         short = self._strip_card(conn)
+        fw = persist.firmware_path(short)
+        minor = self._drm_minor(conn)
 
         try:
             e = edid.Edid.from_connector(conn)
-            placement = "a detailed timing descriptor" \
-                if e.fits_dtd(ml) else "a DisplayID timing record"
-            detail = (f"# This mode will be added to the EDID as {placement}.\n")
-        except edid.EdidError as err:
-            detail = f"# Warning: could not read the current EDID ({err}).\n"
+            placement = "detailed timing descriptor" \
+                if e.fits_dtd(ml) else "DisplayID timing record"
+        except edid.EdidError:
+            placement = "detailed timing / DisplayID record"
 
         method = (persist.METHOD_CMDLINE if self.boot_method_var.get()
                   else persist.METHOD_SYSTEMD)
-        steps = "\n".join(f"#   {i}. {s}" for i, s in
-                          enumerate(persist.describe_plan(short, method), 1))
         installed = persist.installed_connectors()
-        state = ("# Currently installed overrides: "
-                 + (", ".join(installed) if installed else "none") + "\n")
 
-        return (f"# {reason}\n"
-                "# This tool adds the mode by overriding the EDID the kernel\n"
-                "# reads from the display. It works on every compositor.\n"
-                f"{detail}"
-                "#\n"
-                "# Test Mode applies it immediately (needs root, no reboot) and\n"
-                "# reverts automatically unless you keep it.\n"
-                "#\n"
-                f"# Apply Configuration makes it permanent ({method}):\n"
-                f"{steps}\n"
-                "#\n"
-                f"{state}"
-                f"# Connector: {short}   Timing: {ml.xorg_modeline(name)}\n")
+        parts = [
+            f"# {reason}",
+            f"# The {name} timing above is written into a copy of {short}'s EDID",
+            f"# as a {placement}, installed at {fw}.",
+            "",
+            "# --- Test Mode runs, as root (no reboot, auto-reverts) ---",
+            f"cat {os.path.basename(fw)} > /sys/kernel/debug/dri/{minor}/{short}/edid_override",
+            f"echo 1 > /sys/kernel/debug/dri/{minor}/{short}/trigger_hotplug",
+            "",
+        ]
+
+        if method == persist.METHOD_SYSTEMD:
+            parts += [
+                "# --- Apply Configuration installs this boot service ---",
+                f"# {persist.SYSTEMD_UNIT}",
+                persist.systemd_unit_text().rstrip(),
+                "",
+                f"# it runs this helper ({persist.SYSTEMD_HELPER}):",
+                persist.systemd_helper_text().rstrip(),
+            ]
+        else:
+            param = f"drm.edid_firmware={short}:{persist.firmware_rel(short)}"
+            boot, detail = persist.detect_bootloader()
+            initrd, _ = persist.detect_initramfs()
+            parts += [
+                "# --- Apply Configuration adds this to the kernel command line ---",
+                f"#   bootloader: {boot} ({detail})",
+                param,
+                f"# and adds {os.path.basename(fw)} to the initramfs ({initrd}).",
+            ]
+
+        parts += [
+            "",
+            f"# Currently installed overrides: "
+            + (", ".join(installed) if installed else "none"),
+        ]
+        return "\n".join(parts) + "\n"
+
+    def _drm_minor(self, conn):
+        card = conn.partition("-")[0]
+        try:
+            with open(f"/sys/class/drm/{card}/dev") as f:
+                return f.read().strip().split(":")[1]
+        except OSError:
+            return "N"
 
     def _drm_connector_for(self, out):
         for c in self.env.connectors:
@@ -485,7 +627,7 @@ class LinuxCRU:
 
     def create_action_section(self):
         frame = ttk.Frame(self.main_frame)
-        frame.grid(row=5, column=0, sticky="ew", pady=(0, 5))
+        frame.grid(row=6, column=0, sticky="ew", pady=(0, 5))
         frame.grid_columnconfigure(1, weight=1)
 
         ttk.Button(frame, text="Generate Preview",
@@ -506,7 +648,7 @@ class LinuxCRU:
 
         self.status_var = tk.StringVar()
         ttk.Label(self.main_frame, textvariable=self.status_var,
-                  wraplength=780).grid(row=6, column=0, sticky="ew", pady=5)
+                  wraplength=780).grid(row=7, column=0, sticky="ew", pady=5)
 
     def refresh_remove_button(self):
         if persist.installed_connectors():
@@ -534,13 +676,13 @@ class LinuxCRU:
     def _ask_password(self, message, retry):
         return PasswordPrompt(self.root, message, retry).run()
 
-    def _run_root_script(self, script, name):
+    def _run_root_script(self, script, name, interpreter="/bin/bash"):
         """Write `script` to the work dir and run it as root."""
         path = os.path.join(self._work_dir(), name)
         with open(path, "w") as f:
             f.write(script)
         os.chmod(path, 0o755)
-        return privileged.run_as_root(["/bin/bash", path],
+        return privileged.run_as_root([interpreter, path],
                                       ask_password=self._ask_password)
 
     def _work_dir(self):

@@ -57,6 +57,39 @@ def firmware_path(connector):
     return f"{FIRMWARE_DIR}/{FILE_PREFIX}{connector}.bin"
 
 
+def systemd_unit_text():
+    """The exact contents of the boot service that gets installed."""
+    return (f"[Unit]\n"
+            f"Description=Linux CRU custom display modes\n"
+            f"Documentation=https://github.com/PhialsBasement/linux-cru\n"
+            f"After=local-fs.target systemd-modules-load.service\n"
+            f"Before=display-manager.service graphical.target\n"
+            f"ConditionPathExists={SYSTEMD_HELPER}\n\n"
+            f"[Service]\n"
+            f"Type=oneshot\n"
+            f"RemainAfterExit=yes\n"
+            f"ExecStart={SYSTEMD_HELPER}\n\n"
+            f"[Install]\n"
+            f"WantedBy=graphical.target\n")
+
+
+def systemd_helper_text():
+    """The helper the boot service runs: writes edid_firmware, reprobes."""
+    return (f"#!/bin/bash\n"
+            f"# Applies the installed EDID overrides, then re-probes the\n"
+            f"# connectors so the new mode lists are in place before the\n"
+            f"# desktop starts.\n"
+            f"value=\"\"\n"
+            f"for f in {FIRMWARE_DIR}/{FILE_PREFIX}*.bin; do\n"
+            f"    [ -e \"$f\" ] || continue\n"
+            f"    conn=$(basename \"$f\"); conn=${{conn#{FILE_PREFIX}}}; conn=${{conn%.bin}}\n"
+            f"    [ -n \"$value\" ] && value=\"$value,\"\n"
+            f"    value=\"$value$conn:edid/$(basename \"$f\")\"\n"
+            f"done\n"
+            f"echo \"$value\" > /sys/module/drm/parameters/edid_firmware\n"
+            f"# ...then trigger_hotplug / status=detect on each connector\n")
+
+
 def firmware_rel(connector):
     """Path as the kernel parameter wants it (relative to the firmware dir)."""
     return f"edid/{FILE_PREFIX}{connector}.bin"
