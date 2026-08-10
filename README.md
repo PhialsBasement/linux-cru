@@ -1,18 +1,18 @@
 # Linux Custom Resolution Utility (Linux CRU)
 
-A simple graphical utility for creating and applying custom display resolutions on Linux systems. This tool makes it easy to set up custom resolutions and refresh rates without manually editing configuration files.
+A graphical utility for creating and applying custom display resolutions and refresh rates on Linux — the Linux answer to the Windows Custom Resolution Utility. It works out which of the many display paths your system uses and drives the right one for you, on X11 and Wayland, on AMD, Intel and NVIDIA.
 
 ![Linux CRU Screenshot](image.png)
 
 ## Features
 
-- Simple graphical interface for creating custom resolutions
-- Support for custom refresh rates
-- Automatic modeline calculation
-- Reduced blanking support for high refresh rates
-- Force enable mode for overriding EDID restrictions
-- Real-time configuration preview
-- Multi-display support
+- **Works on X11 and Wayland.** Detects your session, compositor and GPU, and picks the method that actually works there — xrandr on X11, native custom modes on KWin (Plasma 6.6+), sway and Hyprland, or a kernel EDID override everywhere else (GNOME, COSMIC, NVIDIA on Wayland).
+- **Correct VESA timings.** CVT, CVT reduced-blanking, CVT-RBv2 (lowest pixel clock, best for overclocking) and GTF for CRTs — all verified against `cvt`/`gtf`.
+- **Test Mode.** Applies a mode for 15 seconds and reverts on its own, so a bad mode is a brief black screen, not a reboot.
+- **EDID override engine.** Patches your monitor's EDID to add modes it doesn't advertise, applied live with no reboot and optionally kept across boots via a systemd service.
+- **Monitor information.** Shows what your display declares (refresh range, horizontal frequency, max pixel clock) and warns when a mode exceeds it.
+- **Stretched resolutions on KWin.** Forces GPU scaling so a lower resolution fills the whole screen — the stretched-res setup competitive-shooter players want.
+- Real-time configuration preview and multi-display support.
 
 ## Installation
 
@@ -43,27 +43,28 @@ chmod +x build_appimage.sh
 ./build_appimage.sh
 ```
 
+The AppImage bundles Python, tkinter and the whole Tcl/Tk runtime, so it runs on a machine with no Python installed.
+
 ### Dependencies for Building
 
 On Arch Linux:
 - python
 - tk
-- xorg-server-utils
 - imagemagick
 
 ## Usage
 
-1. Select your display from the dropdown menu
-2. Enter your desired resolution and refresh rate
-3. Optionally enable reduced blanking for high refresh rates
-4. Preview the configuration
-5. Click "Apply Configuration" to apply the settings
+1. Select your display from the dropdown — the tool fills in its current mode and shows what the monitor reports.
+2. Enter the resolution and refresh rate you want, and pick a timing standard (CVT-RBv2 is the sensible default).
+3. Read the preview: it shows the exact modeline and, per environment, the real commands, xorg.conf, or systemd/EDID files it will use.
+4. Click **Test Mode** to try it for 15 seconds with automatic revert.
+5. Click **Apply Configuration** to keep it. What that does depends on your setup — a live compositor command, an xorg.conf file, or an EDID override installed as a boot service — all shown in the preview first.
 
-The utility will generate appropriate xorg.conf and nvidia.conf files and apply them to your system.
+The tool never changes your resolution behind your back: applying a custom mode makes it *available to select*, it doesn't force your display onto it.
 
 ## Warning
 
-⚠️ Setting incorrect display configurations can lead to blank screens or display issues. Always keep a backup terminal open to revert changes if needed.
+⚠️ Setting incorrect display timings can lead to a blank screen. Test Mode reverts by itself, but for permanent changes keep a way to get back in (another TTY, or removing the setting) in mind. Persistent EDID overrides that use the kernel command line can be undone from the bootloader menu.
 
 ## Contributing
 
@@ -75,6 +76,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Acknowledgments
 
-- Based on the Windows Custom Resolution Utility concept
-- Uses GTK/Tk for the graphical interface
+- Based on the Windows Custom Resolution Utility (ToastyX) concept
+- Uses Tkinter for the graphical interface
 - Thanks to all contributors and testers
