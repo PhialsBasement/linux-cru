@@ -115,6 +115,24 @@ def test_calc_dispatch():
         raise AssertionError("expected ValueError")
 
 
+def test_parse_modeline_roundtrips_and_validates():
+    ml = timings.calc(2560, 1440, 180, "cvt-rb2")
+    back = timings.parse_modeline(ml.timing_string())
+    assert _values(back) == _values(ml) and back.clock_khz == ml.clock_khz
+    assert back.hsync_positive == ml.hsync_positive
+    # accepts the 'Modeline "name"' prefix that xorg/edid-decode print
+    p = timings.parse_modeline(
+        'Modeline "x" 746.064 2560 2568 2600 2640 1440 1556 1564 1570 +hsync -vsync')
+    assert p.hdisplay == 2560 and abs(p.actual_refresh - 180) < 0.1
+    for bad in ["", "junk", "100 1 2 3",
+                "746 2560 2568 2600 2640 1440 1556 1564 1440"]:  # vtotal<=vsync_end
+        try:
+            timings.parse_modeline(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted bad modeline: {bad!r}")
+
+
 # -- differential test against the real cvt(1) binary -----------------------
 
 _CVT_RE = re.compile(

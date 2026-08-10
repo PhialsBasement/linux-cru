@@ -368,26 +368,49 @@ class Edid:
 
     def _add_displayid_block(self):
         if self.block_count >= 4:
-            raise EdidError("EDID already has 3 extension blocks; no room "
-                            "for a DisplayID extension")
+            raise EdidError("the display's EDID is full (4 blocks, the maximum) "
+                            "and has no room for another mode; remove an "
+                            "existing custom mode or free a base timing slot")
         self.data.extend(bytes(BLOCK_SIZE))
         bi = self.block_count - 1
         self._write_displayid(bi, 0x12, [])
         self.data[126] = self.block_count - 1
         return bi
 
-    def _add_type1_record(self, record):
-        bi = self._find_extension(DISPLAYID_TAG)
-        if bi is None:
-            bi = self._add_displayid_block()
-        version, blobs = self._parse_displayid(bi)
+    @staticmethod
+    def _blobs_with_record(blobs, record):
+        """Append a Type I record to an existing Type I block, or start one."""
+        blobs = list(blobs)
         for i, (tag, rev, payload) in enumerate(blobs):
+            # keep the data-block payload length in its one byte (<=255)
             if tag == TYPE1_TAG and len(payload) + 20 <= 255:
                 blobs[i] = (tag, rev, payload + record)
-                break
-        else:
-            blobs.append((TYPE1_TAG, 0x00, record))
-        self._write_displayid(bi, version, blobs)
+                return blobs
+        blobs.append((TYPE1_TAG, 0x00, record))
+        return blobs
+
+    @staticmethod
+    def _displayid_payload_size(blobs):
+        return sum(3 + len(p) for _, _, p in blobs)
+
+    def _add_type1_record(self, record):
+        # Put the record in an existing DisplayID extension that still has
+        # room; a display that already ships a packed DisplayID block (many
+        # high-refresh monitors do) gets a fresh extension block instead of
+        # an "extension is full" error.
+        for bi in range(1, self.block_count):
+            if self.extension_tag(bi) != DISPLAYID_TAG:
+                continue
+            version, blobs = self._parse_displayid(bi)
+            candidate = self._blobs_with_record(blobs, record)
+            if self._displayid_payload_size(candidate) <= DISPLAYID_MAX_PAYLOAD:
+                self._write_displayid(bi, version, candidate)
+                return
+        # no existing DisplayID extension had room -> add another block
+        bi = self._add_displayid_block()
+        version, blobs = self._parse_displayid(bi)
+        self._write_displayid(bi, version,
+                              self._blobs_with_record(blobs, record))
 
     # -- main entry points ---------------------------------------------------------
 
@@ -455,8 +478,9 @@ class Edid:
                         break
                     modes.append(EdidMode(location="cta-dtd", **info))
                     pos += 18
-        bi = self._find_extension(DISPLAYID_TAG)
-        if bi is not None:
+        for bi in range(1, self.block_count):
+            if self.extension_tag(bi) != DISPLAYID_TAG:
+                continue
             _, blobs = self._parse_displayid(bi)
             for tag, _, payload in blobs:
                 if tag != TYPE1_TAG:

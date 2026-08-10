@@ -280,6 +280,51 @@ def gtf(width: int, height: int, refresh: float) -> Modeline:
     )
 
 
+def parse_modeline(text: str) -> Modeline:
+    """Parse an exact modeline into a Modeline.
+
+    Accepts the body that cvt(1), gtf(1) and Windows CRU all print:
+        746.064 2560 2568 2600 2640 1440 1556 1564 1570 +hsync -vsync
+    with or without a leading `Modeline` keyword and a quoted "name".
+    The clock is in MHz. Sync flags are optional; if a polarity is not
+    given it defaults to negative.
+    """
+    import re
+    t = text.strip()
+    if t.lower().startswith("modeline"):
+        t = t[len("modeline"):].strip()
+    m = re.match(r'"[^"]*"\s*(.*)', t)      # drop a quoted mode name
+    if m:
+        t = m.group(1)
+    parts = t.split()
+    if len(parts) < 9:
+        raise ValueError("expected: clock hdisp hsync-start hsync-end htotal "
+                         "vdisp vsync-start vsync-end vtotal [flags]")
+    try:
+        clock_khz = int(round(float(parts[0]) * 1000))
+        hd, hss, hse, ht, vd, vss, vse, vt = (int(x) for x in parts[1:9])
+    except ValueError:
+        raise ValueError("clock and the eight timing values must be numbers")
+    flags = " ".join(parts[9:]).lower()
+
+    if not (0 < hd < hss < hse <= ht):
+        raise ValueError("horizontal values must be 0 < hdisp < hsync-start "
+                         "< hsync-end <= htotal")
+    if not (0 < vd < vss < vse <= vt):
+        raise ValueError("vertical values must be 0 < vdisp < vsync-start "
+                         "< vsync-end <= vtotal")
+    if clock_khz <= 0:
+        raise ValueError("pixel clock must be positive")
+
+    return Modeline(
+        clock_khz=clock_khz,
+        hdisplay=hd, hsync_start=hss, hsync_end=hse, htotal=ht,
+        vdisplay=vd, vsync_start=vss, vsync_end=vse, vtotal=vt,
+        hsync_positive="+hsync" in flags,
+        vsync_positive="+vsync" in flags,
+    )
+
+
 def calc(width: int, height: int, refresh: float, standard: str = "cvt-rb2") -> Modeline:
     if standard == "cvt":
         return cvt(width, height, refresh)

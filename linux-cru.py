@@ -245,13 +245,24 @@ class LinuxCRU:
             ("CVT-RB (reduced blanking v1)", "cvt-rb"),
             ("CVT (full blanking)", "cvt"),
             ("GTF (for CRT monitors)", "gtf"),
+            ("Manual (paste an exact modeline, e.g. from Windows CRU)", "manual"),
         ]
         for i, (label, value) in enumerate(options):
-            ttk.Radiobutton(frame, text=label, variable=self.standard_var, value=value,
-                            command=self.generate_preview).grid(row=i, column=0,
-                                                                sticky="w", padx=5)
+            ttk.Radiobutton(frame, text=label, variable=self.standard_var,
+                            value=value, command=self._on_standard_change
+                            ).grid(row=i, column=0, sticky="w", padx=5)
 
-        row = len(options)
+        # Manual entry: the modeline body cvt/gtf/CRU print. Hidden until
+        # the Manual option is chosen.
+        self.modeline_var = tk.StringVar()
+        self.manual_row = ttk.Frame(frame)
+        ttk.Label(self.manual_row, text="Modeline:").pack(side=tk.LEFT, padx=(20, 4))
+        entry = ttk.Entry(self.manual_row, textvariable=self.modeline_var, width=64)
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.modeline_var.trace_add("write", lambda *a: self.generate_preview())
+        self._manual_row_index = len(options)
+
+        row = len(options) + 1
         self.relax_validation = tk.BooleanVar(value=False)
         if self.env.has_nvidia_proprietary and self.env.session_type == "x11":
             ttk.Checkbutton(
@@ -401,7 +412,27 @@ class LinuxCRU:
         x.grid(row=1, column=0, sticky="ew")
         self.preview_text.configure(yscrollcommand=y.set, xscrollcommand=x.set)
 
+    def _on_standard_change(self):
+        if self.standard_var.get() == "manual":
+            self.manual_row.grid(row=self._manual_row_index, column=0,
+                                 sticky="ew", pady=(2, 4))
+            if not self.modeline_var.get().strip():
+                # prefill from the current inputs so there's a starting point
+                try:
+                    w, h, r = self.read_inputs()
+                    self.modeline_var.set(timings.calc(w, h, r, "cvt-rb2")
+                                          .timing_string())
+                except ValueError:
+                    pass
+        else:
+            self.manual_row.grid_remove()
+        self.generate_preview()
+
     def current_modeline(self):
+        if self.standard_var.get() == "manual":
+            ml = timings.parse_modeline(self.modeline_var.get())
+            name = f"{ml.hdisplay}x{ml.vdisplay}_{ml.actual_refresh:g}"
+            return name, ml
         w, h, r = self.read_inputs()
         ml = timings.calc(w, h, r, self.standard_var.get())
         name = f"{w}x{h}_{r:g}"
@@ -410,7 +441,15 @@ class LinuxCRU:
     def generate_preview(self):
         try:
             name, ml = self.current_modeline()
-        except ValueError:
+        except ValueError as e:
+            if self.standard_var.get() == "manual":
+                self.preview_text.delete(1.0, tk.END)
+                self.preview_text.insert(
+                    1.0, "# Enter a modeline like:\n"
+                         "#   746.064 2560 2568 2600 2640 1440 1556 1564 1570 "
+                         "+hsync -vsync\n"
+                         "# (clock in MHz, then the eight timing values, then "
+                         f"the sync flags)\n#\n# {e}\n")
             return  # incomplete input while typing
         out = self.display_var.get()
 

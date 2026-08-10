@@ -153,6 +153,41 @@ def test_add_big_mode_creates_displayid_block():
                and m.location == "displayid" for m in modes), modes
 
 
+def test_full_displayid_spills_to_a_new_block():
+    """A monitor that already ships a packed DisplayID block must not
+    produce an 'extension is full' error -- add another block instead."""
+    e = make_base_edid()
+    # a 4K@240-ish mode is >655 MHz so it can only live in DisplayID
+    added = 0
+    from linux_cru.edid import EdidError
+    for r in range(240, 120, -1):
+        try:
+            assert e.add_mode(timings.calc(2560, 1440, r, "cvt-rb2")) == "displayid"
+            added += 1
+        except EdidError:
+            break
+    assert added >= 6, f"only added {added} before failing"
+    assert e.block_count >= 3, "should have spilled into a second DisplayID block"
+    data = e.to_bytes()
+    assert Edid(data).checksum_errors() == []
+    # everything we added parses back
+    dids = [m for m in Edid(data).list_modes() if m.location == "displayid"]
+    assert len(dids) == added, (len(dids), added)
+
+
+def test_four_block_limit_is_a_clear_error():
+    from linux_cru.edid import EdidError
+    e = make_base_edid()
+    err = None
+    try:
+        for r in range(240, 100, -1):
+            e.add_mode(timings.calc(2560, 1440, r, "cvt-rb2"))
+    except EdidError as ex:
+        err = str(ex)
+    assert err and "full" in err.lower(), err
+    assert e.block_count <= 4
+
+
 def test_fill_base_slots_then_spill():
     e = make_base_edid()
     for i, r in enumerate((60, 75, 100, 120)):
