@@ -37,6 +37,7 @@ FIRMWARE_DIR = "/usr/lib/firmware/edid"
 FILE_PREFIX = "linux-cru-"
 MARKER = "# linux-cru: managed line, removed automatically on uninstall"
 
+MKINITCPIO_CONF = "/etc/mkinitcpio.conf"
 MKINITCPIO_DROPIN = "/etc/mkinitcpio.conf.d/99-linux-cru.conf"
 DRACUT_DROPIN = "/etc/dracut.conf.d/99-linux-cru.conf"
 INITRAMFS_TOOLS_HOOK = "/etc/initramfs-tools/hooks/linux-cru"
@@ -97,7 +98,7 @@ def detect_bootloader():
 
 def detect_initramfs():
     """('mkinitcpio'|'dracut'|'initramfs-tools'|'none', detail)."""
-    if os.path.exists("/etc/mkinitcpio.conf"):
+    if os.path.exists(MKINITCPIO_CONF):
         return "mkinitcpio", MKINITCPIO_DROPIN
     if os.path.isdir("/etc/dracut.conf.d") or os.path.exists("/usr/bin/dracut"):
         return "dracut", DRACUT_DROPIN
@@ -382,7 +383,7 @@ update_bootloader() {{
 def _initramfs_snippet():
     return f"""
 update_initramfs_config() {{
-    if [ -f /etc/mkinitcpio.conf ]; then
+    if [ -f '{MKINITCPIO_CONF}' ]; then
         local files=""
         local f
         for f in "$FWDIR/$PREFIX"*.bin; do
@@ -390,7 +391,7 @@ update_initramfs_config() {{
             files="$files $f"
         done
         if [ -n "$files" ]; then
-            mkdir -p /etc/mkinitcpio.conf.d
+            mkdir -p "$(dirname '{MKINITCPIO_DROPIN}')"
             printf '# Managed by Linux CRU\\nFILES+=(%s)\\n' "$files" \\
                 > '{MKINITCPIO_DROPIN}'
         else
@@ -406,7 +407,7 @@ update_initramfs_config() {{
             [ -e "$f" ] || continue
             items="$items $f"
         done
-        mkdir -p /etc/dracut.conf.d
+        mkdir -p "$(dirname '{DRACUT_DROPIN}')"
         if [ -n "$items" ]; then
             printf '# Managed by Linux CRU\\ninstall_items+="%s "\\n' "$items" \\
                 > '{DRACUT_DROPIN}'
@@ -418,7 +419,7 @@ update_initramfs_config() {{
 
     elif command -v update-initramfs >/dev/null 2>&1; then
         if ls "$FWDIR/$PREFIX"*.bin >/dev/null 2>&1; then
-            mkdir -p /etc/initramfs-tools/hooks
+            mkdir -p "$(dirname '{INITRAMFS_TOOLS_HOOK}')"
             cat > '{INITRAMFS_TOOLS_HOOK}' <<'HOOKEOF'
 #!/bin/sh
 # Managed by Linux CRU

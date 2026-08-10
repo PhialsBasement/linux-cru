@@ -28,6 +28,7 @@ def _sandbox(root, bootloader="limine"):
     persist.KERNEL_CMDLINE = f"{root}/etc/kernel/cmdline"
     persist.SYSTEMD_UNIT = f"{root}/etc/systemd/system/linux-cru-edid.service"
     persist.SYSTEMD_HELPER = f"{root}/usr/lib/linux-cru/apply-edid.sh"
+    persist.MKINITCPIO_CONF = f"{root}/etc/mkinitcpio.conf"
     os.makedirs(f"{root}/etc/systemd/system", exist_ok=True)
 
     os.makedirs(f"{root}/etc/default", exist_ok=True)
@@ -54,11 +55,21 @@ def _run(script, root):
             f.write(f'#!/bin/sh\necho "STUB {tool} $*" >> "{root}/tools.log"\n')
         os.chmod(p, 0o755)
 
+    # A generated script must never reach outside the sandbox: every
+    # path it writes to comes from a module constant, and those are all
+    # redirected here. This is what stopped the suite from being
+    # hermetic before, and it only showed up on a machine that did not
+    # already have /etc/mkinitcpio.conf.d.
+    for line in script.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") or "mkdir" not in stripped:
+            continue
+        assert root in line or "$(dirname" in line or "DESTDIR" in line, \
+            f"script creates a directory outside the sandbox: {line}"
+
     path = f"{root}/script.sh"
-    # /etc/mkinitcpio.conf presence drives the initramfs branch; fake it
     with open(path, "w") as f:
-        f.write(script.replace("/etc/mkinitcpio.conf ",
-                               f"{root}/etc/mkinitcpio.conf "))
+        f.write(script)
     env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
     return subprocess.run(["bash", path], capture_output=True,
                           universal_newlines=True, env=env)
@@ -68,7 +79,7 @@ def test_install_then_uninstall_limine():
     root = tempfile.mkdtemp(prefix="cru-persist-")
     try:
         _sandbox(root, "limine")
-        open(f"{root}/etc/mkinitcpio.conf", "w").write("FILES=()\n")
+        open(persist.MKINITCPIO_CONF, "w").write("FILES=()\n")
         edid = f"{root}/patched.bin"
         with open(edid, "wb") as f:
             f.write(b"\x00" * 256)
@@ -126,7 +137,7 @@ def test_systemd_method_leaves_boot_path_alone():
     root = tempfile.mkdtemp(prefix="cru-persist-")
     try:
         _sandbox(root, "limine")
-        open(f"{root}/etc/mkinitcpio.conf", "w").write("FILES=()\n")
+        open(persist.MKINITCPIO_CONF, "w").write("FILES=()\n")
         limine_before = open(persist.LIMINE_DEFAULT).read()
         edid = f"{root}/patched.bin"
         with open(edid, "wb") as f:
@@ -187,7 +198,7 @@ def test_systemd_helper_handles_two_displays():
     root = tempfile.mkdtemp(prefix="cru-persist-")
     try:
         _sandbox(root, "limine")
-        open(f"{root}/etc/mkinitcpio.conf", "w").write("FILES=()\n")
+        open(persist.MKINITCPIO_CONF, "w").write("FILES=()\n")
         edid = f"{root}/patched.bin"
         with open(edid, "wb") as f:
             f.write(b"\x00" * 256)
@@ -216,7 +227,7 @@ def test_install_then_uninstall_grub():
     root = tempfile.mkdtemp(prefix="cru-persist-")
     try:
         _sandbox(root, "grub")
-        open(f"{root}/etc/mkinitcpio.conf", "w").write("FILES=()\n")
+        open(persist.MKINITCPIO_CONF, "w").write("FILES=()\n")
         edid = f"{root}/patched.bin"
         with open(edid, "wb") as f:
             f.write(b"\x00" * 256)
