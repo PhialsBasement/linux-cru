@@ -127,13 +127,78 @@ def detect() -> Environment:
     return env
 
 
+# Compositors that serve Wayland. Used to work out what is running when
+# the environment does not say, and to name it in the interface.
+_WAYLAND_COMPOSITORS = {
+    "kwin_wayland": "kwin",
+    "gnome-shell": "mutter",
+    "mutter": "mutter",
+    "sway": "sway",
+    "Hyprland": "hyprland",
+    "labwc": "labwc",
+    "river": "river",
+    "niri": "niri",
+    "wayfire": "wayfire",
+    "cosmic-comp": "cosmic",
+    "weston": "weston",
+}
+
+
+def _wayland_socket_present():
+    """True if a compositor is serving Wayland for this user."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    named = os.environ.get("WAYLAND_DISPLAY")
+    if named:
+        path = named if named.startswith("/") else os.path.join(runtime, named)
+        if os.path.exists(path):
+            return True
+    return bool(glob.glob(os.path.join(runtime, "wayland-*"))
+                and not all(p.endswith(".lock")
+                            for p in glob.glob(os.path.join(runtime, "wayland-*"))))
+
+
+def _running_compositor():
+    """Name of the Wayland compositor this user is running, or ''."""
+    uid = os.getuid()
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return ""
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            if os.stat(f"/proc/{entry}").st_uid != uid:
+                continue
+            with open(f"/proc/{entry}/comm") as f:
+                comm = f.read().strip()
+        except OSError:
+            continue
+        if comm in _WAYLAND_COMPOSITORS:
+            return _WAYLAND_COMPOSITORS[comm]
+    return ""
+
+
 def _session_type():
+    """x11 / wayland / unknown.
+
+    The environment is not trusted on its own. A launcher can drop
+    WAYLAND_DISPLAY, and an application started under XWayland sees
+    DISPLAY and looks like a plain X11 session -- but on XWayland the
+    X11 route is a dead end, because xrandr only changes the XWayland
+    server and xorg.conf is never read. So if this user has a
+    compositor serving Wayland, this is a Wayland session whatever the
+    variables claim.
+    """
     st = os.environ.get("XDG_SESSION_TYPE", "").lower()
-    if st in ("x11", "wayland"):
-        return st
-    if os.environ.get("WAYLAND_DISPLAY"):
+
+    if os.environ.get("WAYLAND_DISPLAY") and _wayland_socket_present():
         return "wayland"
-    if os.environ.get("DISPLAY"):
+    if st == "wayland":
+        return "wayland"
+    if _wayland_socket_present() and _running_compositor():
+        return "wayland"
+    if st == "x11" or os.environ.get("DISPLAY"):
         return "x11"
     return "unknown"
 
@@ -141,21 +206,53 @@ def _session_type():
 def _compositor(env):
     desktop = env.desktop.lower()
     if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or "hyprland" in desktop:
-        return "hyprland", _version_tuple(_run(["hyprctl", "version"]))
+        return "hyprland", _compositor_version("hyprland")
     if os.environ.get("SWAYSOCK") or desktop == "sway":
-        return "sway", _version_tuple(_run(["sway", "--version"]))
+        return "sway", _compositor_version("sway")
     if "kde" in desktop or "plasma" in desktop:
-        return "kwin", _version_tuple(_run(["plasmashell", "--version"]))
+        return "kwin", _compositor_version("kwin")
     if "gnome" in desktop:
-        return "mutter", _version_tuple(_run(["gnome-shell", "--version"]))
+        return "mutter", _compositor_version("mutter")
     if "cosmic" in desktop:
         return "cosmic", ()
     for name in ("river", "labwc", "niri", "wayfire"):
         if name in desktop:
             return name, ()
+
+    # XDG_CURRENT_DESKTOP is missing or unhelpful: ask the process list.
+    if env.session_type == "wayland":
+        running = _running_compositor()
+        if running:
+            return running, _compositor_version(running)
+
     if env.session_type == "x11":
         return "x11", ()
     return (desktop or "unknown"), ()
+
+
+def _compositor_version(name):
+    """Version of the running compositor, or ().
+
+    Several candidates per compositor: plasmashell prints nothing when
+    it has no session to talk to, while kwin_wayland reports its version
+    in any environment, and KWin and Plasma share a version number.
+    """
+    probes = {
+        "kwin": (["kwin_wayland", "--version"], ["kwin_x11", "--version"],
+                 ["plasmashell", "--version"]),
+        "mutter": (["gnome-shell", "--version"], ["mutter", "--version"]),
+        "sway": (["sway", "--version"],),
+        "hyprland": (["hyprctl", "version"], ["Hyprland", "--version"]),
+        "labwc": (["labwc", "--version"],),
+        "river": (["river", "--version"],),
+        "niri": (["niri", "--version"],),
+        "wayfire": (["wayfire", "--version"],),
+    }.get(name, ())
+    for probe in probes:
+        version = _version_tuple(_run(probe))
+        if version:
+            return version
+    return ()
 
 
 def _gpus():

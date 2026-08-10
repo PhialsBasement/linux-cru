@@ -23,6 +23,63 @@ def test_detect_runs_and_is_coherent():
     assert isinstance(text, str) and len(text) > 20
 
 
+def test_xwayland_is_not_mistaken_for_an_x11_session():
+    """Under XWayland the X11 route is a dead end, so it must not be chosen.
+
+    A launcher can drop WAYLAND_DISPLAY, and XWayland then looks exactly
+    like a plain X11 session: DISPLAY is set and xrandr even reports the
+    real connector names. Applying anything through xrandr or xorg.conf
+    in that state does nothing.
+    """
+    import os
+    saved = dict(os.environ)
+    try:
+        for var in ("WAYLAND_DISPLAY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP"):
+            os.environ.pop(var, None)
+        os.environ["DISPLAY"] = ":0"
+
+        detect._wayland_socket_present = lambda: True
+        detect._running_compositor = lambda: "kwin"
+        assert detect._session_type() == "wayland", \
+            "a compositor is serving Wayland, so this is a Wayland session"
+
+        # Even when the environment actively claims X11.
+        os.environ["XDG_SESSION_TYPE"] = "x11"
+        assert detect._session_type() == "wayland"
+
+        # With no compositor, an X11 session is still an X11 session.
+        detect._wayland_socket_present = lambda: False
+        detect._running_compositor = lambda: ""
+        assert detect._session_type() == "x11"
+
+        # Nothing at all to go on.
+        os.environ.pop("XDG_SESSION_TYPE")
+        os.environ.pop("DISPLAY")
+        assert detect._session_type() == "unknown"
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+        importlib = __import__("importlib")
+        importlib.reload(detect)
+
+
+def test_compositor_identified_without_desktop_variable():
+    """XDG_CURRENT_DESKTOP is often absent when a launcher scrubs the env."""
+    import os
+    saved = dict(os.environ)
+    try:
+        os.environ.pop("XDG_CURRENT_DESKTOP", None)
+        detect._running_compositor = lambda: "kwin"
+        detect._compositor_version = lambda name: (6, 7, 3)
+        env = detect.Environment(session_type="wayland")
+        name, version = detect._compositor(env)
+        assert name == "kwin" and version == (6, 7, 3), (name, version)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+        __import__("importlib").reload(detect)
+
+
 def test_unusable_modes_are_rejected():
     """Virtual displays report 0 Hz; accepting that breaks every calculation."""
     env = detect.Environment(session_type="x11", compositor="x11")
