@@ -1,8 +1,9 @@
 """Persistent EDID overrides.
 
-The patched EDID always goes to
-/usr/lib/firmware/edid/linux-cru-<connector>.bin. There are two ways to
-make the kernel load it at boot:
+The patched EDID goes to /var/lib/linux-cru/firmware/edid/ (not
+/usr/lib/firmware, so it works on immutable distros where /usr is
+read-only), and the kernel is pointed there with firmware_class.path.
+There are two ways to make the kernel load it at boot:
 
 "systemd" (the default)
     A oneshot service writes the override into the drm module's
@@ -33,9 +34,24 @@ import glob
 import os
 import re
 
-FIRMWARE_DIR = "/usr/lib/firmware/edid"
+# The EDID files live under /var, not /usr/lib/firmware, so this works on
+# immutable distros (Bazzite, Silverblue, SteamOS) where /usr is read-only.
+# The kernel is pointed at this directory with firmware_class.path, which
+# it searches before the standard read-only firmware paths.
+FIRMWARE_SEARCH_PATH = "/var/lib/linux-cru/firmware"
+FIRMWARE_DIR = f"{FIRMWARE_SEARCH_PATH}/edid"
 FILE_PREFIX = "linux-cru-"
 MARKER = "# linux-cru: managed line, removed automatically on uninstall"
+
+
+def usr_is_readonly():
+    """True on an immutable distro where /usr can't be written."""
+    try:
+        if os.path.exists("/run/ostree-booted"):
+            return True
+        return bool(os.statvfs("/usr").f_flag & os.ST_RDONLY)
+    except OSError:
+        return False
 
 MKINITCPIO_CONF = "/etc/mkinitcpio.conf"
 MKINITCPIO_DROPIN = "/etc/mkinitcpio.conf.d/99-linux-cru.conf"
@@ -47,7 +63,7 @@ LIMINE_DEFAULT = "/etc/default/limine"
 KERNEL_CMDLINE = "/etc/kernel/cmdline"
 
 SYSTEMD_UNIT = "/etc/systemd/system/linux-cru-edid.service"
-SYSTEMD_HELPER = "/usr/lib/linux-cru/apply-edid.sh"
+SYSTEMD_HELPER = "/var/lib/linux-cru/apply-edid.sh"
 
 METHOD_SYSTEMD = "systemd"
 METHOD_CMDLINE = "cmdline"
@@ -79,6 +95,9 @@ def systemd_helper_text():
             f"# Applies the installed EDID overrides, then re-probes the\n"
             f"# connectors so the new mode lists are in place before the\n"
             f"# desktop starts.\n"
+            f"# point the kernel firmware loader at our writable dir\n"
+            f"printf '%s' '{FIRMWARE_SEARCH_PATH}' "
+            f"> /sys/module/firmware_class/parameters/path\n"
             f"value=\"\"\n"
             f"for f in {FIRMWARE_DIR}/{FILE_PREFIX}*.bin; do\n"
             f"    [ -e \"$f\" ] || continue\n"
@@ -213,7 +232,9 @@ cru_value() {{
 cru_param() {{
     local v
     v=$(cru_value)
-    if [ -n "$v" ]; then printf 'drm.edid_firmware=%s' "$v"; fi
+    if [ -n "$v" ]; then
+        printf 'firmware_class.path={FIRMWARE_SEARCH_PATH} drm.edid_firmware=%s' "$v"
+    fi
 }}
 
 # Connectors we have EDIDs installed for.
@@ -245,6 +266,7 @@ write_helper() {{
 set -u
 FWDIR='@FWDIR@'
 PREFIX='@PREFIX@'
+SEARCHPATH='@SEARCHPATH@'
 
 value=""
 for f in "$FWDIR/$PREFIX"*.bin; do
@@ -257,6 +279,9 @@ for f in "$FWDIR/$PREFIX"*.bin; do
 done
 [ -n "$value" ] || exit 0
 
+# point the firmware loader at our writable dir (works where /usr is
+# read-only), then apply the overrides
+printf '%s' "$SEARCHPATH" > /sys/module/firmware_class/parameters/path
 echo "$value" > /sys/module/drm/parameters/edid_firmware
 
 # Re-probe: the driver already detected these connectors (with the
@@ -278,7 +303,7 @@ for f in "$FWDIR/$PREFIX"*.bin; do
     done
 done
 HELPEREOF
-    sed -i "s|@FWDIR@|$FWDIR|g; s|@PREFIX@|$PREFIX|g" "$HELPER"
+    sed -i "s|@FWDIR@|$FWDIR|g; s|@PREFIX@|$PREFIX|g; s|@SEARCHPATH@|{FIRMWARE_SEARCH_PATH}|g" "$HELPER"
     chmod 755 "$HELPER"
 }}
 
@@ -346,8 +371,11 @@ MARKER='{MARKER}'
 
 strip_managed_lines() {{  # $1 = file
     [ -f "$1" ] || return 0
-    grep -v -F "$MARKER" "$1" | grep -v '^KERNEL_CMDLINE\\[default\\]+=" drm\\.edid_firmware=' \\
-        | grep -v '^GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT drm\\.edid_firmware=' \\
+    # drop our marker comment and any managed cmdline line, matched by the
+    # params it carries (firmware_class.path / drm.edid_firmware) so it
+    # works regardless of the leading KERNEL_CMDLINE/GRUB_CMDLINE token
+    grep -v -F "$MARKER" "$1" \\
+        | grep -vE '^(KERNEL_CMDLINE\\[default\\]\\+=|GRUB_CMDLINE_LINUX_DEFAULT=).*(firmware_class\\.path=|drm\\.edid_firmware=)' \\
         > "$1.linux-cru-tmp" && mv "$1.linux-cru-tmp" "$1"
 }}
 
@@ -382,7 +410,7 @@ update_bootloader() {{
 
     elif [ -f '{KERNEL_CMDLINE}' ]; then
         cp -n '{KERNEL_CMDLINE}' '{KERNEL_CMDLINE}.linux-cru-backup' 2>/dev/null || true
-        sed -i -E 's/ ?drm\\.edid_firmware=[^ ]*//g' '{KERNEL_CMDLINE}'
+        sed -i -E 's/ ?(firmware_class\\.path|drm\\.edid_firmware)=[^ ]*//g' '{KERNEL_CMDLINE}'
         if [ -n "$param" ]; then
             printf '%s' " $param" >> '{KERNEL_CMDLINE}'
         fi
@@ -397,7 +425,7 @@ update_bootloader() {{
                 [ -e "$entry" ] || continue
                 case "$entry" in *fallback*) continue;; esac
                 cp -n "$entry" "$entry.linux-cru-backup" 2>/dev/null || true
-                sed -i -E 's/ ?drm\\.edid_firmware=[^ ]*//g' "$entry"
+                sed -i -E 's/ ?(firmware_class\\.path|drm\\.edid_firmware)=[^ ]*//g' "$entry"
                 if [ -n "$param" ]; then
                     sed -i -E "s|^(options .*)$|\\\\1 $param|" "$entry"
                 fi

@@ -627,7 +627,8 @@ class LinuxCRU:
                 persist.systemd_helper_text().rstrip(),
             ]
         else:
-            param = f"drm.edid_firmware={short}:{persist.firmware_rel(short)}"
+            param = (f"firmware_class.path={persist.FIRMWARE_SEARCH_PATH} "
+                     f"drm.edid_firmware={short}:{persist.firmware_rel(short)}")
             boot, detail = persist.detect_bootloader()
             initrd, _ = persist.detect_initramfs()
             parts += [

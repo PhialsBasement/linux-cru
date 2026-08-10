@@ -19,7 +19,8 @@ from linux_cru import persist
 
 def _sandbox(root, bootloader="limine"):
     """Point the module's paths into `root` and build the fake tree."""
-    persist.FIRMWARE_DIR = f"{root}/usr/lib/firmware/edid"
+    persist.FIRMWARE_SEARCH_PATH = f"{root}/var/lib/linux-cru/firmware"
+    persist.FIRMWARE_DIR = f"{root}/var/lib/linux-cru/firmware/edid"
     persist.MKINITCPIO_DROPIN = f"{root}/etc/mkinitcpio.conf.d/99-linux-cru.conf"
     persist.DRACUT_DROPIN = f"{root}/etc/dracut.conf.d/99-linux-cru.conf"
     persist.INITRAMFS_TOOLS_HOOK = f"{root}/etc/initramfs-tools/hooks/linux-cru"
