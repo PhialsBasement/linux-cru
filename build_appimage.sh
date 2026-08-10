@@ -18,9 +18,12 @@ fi
 # Create directory structure
 mkdir -p linux_cru.AppDir/usr/{bin,lib/python${PYTHON_VERSION},share/{applications,icons/hicolor/{16x16,32x32,48x48,64x64,128x128,256x256,512x512,scalable}/apps}}
 
-# Copy your script
+# Copy your script and the linux_cru package (into the bundled Python's lib
+# dir, which AppRun puts on PYTHONPATH)
 cp linux-cru.py linux_cru.AppDir/usr/bin/linux_cru
 chmod +x linux_cru.AppDir/usr/bin/linux_cru
+cp -r linux_cru linux_cru.AppDir/usr/lib/python${PYTHON_VERSION}/linux_cru
+rm -rf linux_cru.AppDir/usr/lib/python${PYTHON_VERSION}/linux_cru/__pycache__
 
 # Create the desktop entry
 cat > linux_cru.AppDir/usr/share/applications/linux_cru.desktop << 'EOF'

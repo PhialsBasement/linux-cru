@@ -1,458 +1,562 @@
 #!/usr/bin/env python3
-import tkinter as tk
-from tkinter import ttk, messagebox
-import subprocess
-import os
-import re
-from pathlib import Path
-import sys
-import tempfile
-import shutil
-from datetime import datetime
+"""Linux Custom Resolution Utility.
 
-class SudoPrompt:
-    def __init__(self, parent):
-        self.dialog = tk.Toplevel(parent)
-        self.dialog.title("Authentication Required")
-        self.dialog.geometry("300x150")
-        self.dialog.transient(parent)
-        self.dialog.grab_set()
-        
-        # Center the dialog on parent
-        if parent:
-            x = parent.winfo_x() + (parent.winfo_width() // 2) - (300 // 2)
-            y = parent.winfo_y() + (parent.winfo_height() // 2) - (150 // 2)
-            self.dialog.geometry(f"+{x}+{y}")
-        
-        style = ttk.Style()
-        style.configure("Auth.TLabel", font=("TkDefaultFont", 10))
-        
-        ttk.Label(self.dialog, 
-                 text="Administrator privileges are required\nto modify display settings.",
-                 style="Auth.TLabel",
-                 justify="center").pack(pady=10)
-        
-        self.password = tk.StringVar()
-        self.entry = ttk.Entry(self.dialog, show="●", textvariable=self.password)
-        self.entry.pack(pady=10, padx=20, fill=tk.X)
-        
-        btn_frame = ttk.Frame(self.dialog)
-        btn_frame.pack(fill=tk.X, pady=10, padx=20)
-        
-        ttk.Button(btn_frame, text="OK", 
-                  command=self.dialog.quit).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(btn_frame, text="Cancel", 
-                  command=self.cancel).pack(side=tk.RIGHT, padx=5)
-        
-        self.entry.bind('<Return>', lambda e: self.dialog.quit())
-        self.entry.focus()
-        
-    def cancel(self):
-        self.password.set("")
-        self.dialog.quit()
+GUI front-end over linux_cru: environment detection, VESA timing
+calculation, live testing via xrandr (X11) with auto-revert, and
+persistence via /etc/X11/xorg.conf.d. On Wayland, generates the
+compositor-native commands where they exist (see docs/RESEARCH.md);
+the kernel EDID-override backend is the next milestone.
+"""
+
+import os
+import subprocess
+import sys
+import tkinter as tk
+from datetime import datetime
+from tkinter import ttk, messagebox
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from linux_cru import detect, timings
+
+TEST_REVERT_SECONDS = 15
+
 
 def run_with_sudo(command, work_dir=None):
+    """Run a command as root via pkexec (graphical auth prompt)."""
     try:
-        # First try pkexec
-        cmd = ['pkexec'] + command
-        process = subprocess.Popen(cmd,
-                                 stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE,
-                                 cwd=work_dir)
+        process = subprocess.Popen(['pkexec'] + command,
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE,
+                                   cwd=work_dir)
         output, error = process.communicate()
-        
         if process.returncode == 0:
             return True, output.decode()
-        
-        # If pkexec fails, try with graphical sudo alternatives
-        for sudo_cmd in ['gksudo', 'kdesu', 'beesu']:
-            try:
-                cmd = [sudo_cmd] + command
-                process = subprocess.Popen(cmd,
-                                        stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE,
-                                        cwd=work_dir)
-                output, error = process.communicate()
-                
-                if process.returncode == 0:
-                    return True, output.decode()
-            except FileNotFoundError:
-                continue
-        
         return False, error.decode()
     except Exception as e:
         return False, str(e)
+
 
 class LinuxCRU:
     def __init__(self, root):
         self.root = root
         self.root.title("Linux Custom Resolution Utility")
-        
-        # Set window size and make it resizable
-        self.root.geometry("800x700")
-        self.root.minsize(600, 500)
-        
-        # Configure grid weights for resizing
+        self.root.geometry("860x780")
+        self.root.minsize(640, 560)
         self.root.grid_columnconfigure(0, weight=1)
         self.root.grid_rowconfigure(0, weight=1)
-        
-        # Set window icon if running as AppImage
-        if getattr(sys, 'frozen', False):
-            icon_path = os.path.join(os.path.dirname(sys.executable), 
-                                   'usr/share/icons/hicolor/256x256/apps/linux_cru.png')
-            if os.path.exists(icon_path):
-                img = tk.PhotoImage(file=icon_path)
-                self.root.tk.call('wm', 'iconphoto', self.root._w, img)
-        
-        # Create main container with padding
+
+        self.env = detect.detect()
+
         self.main_frame = ttk.Frame(root, padding="10")
         self.main_frame.grid(row=0, column=0, sticky="nsew")
         self.main_frame.grid_columnconfigure(0, weight=1)
-        
-        # Style configuration
-        style = ttk.Style()
-        style.configure('Header.TLabel', font=('TkDefaultFont', 12, 'bold'))
-        
-        # Create the interface sections
+        self.main_frame.grid_rowconfigure(4, weight=1)  # preview grows
+
+        self.create_environment_section()
         self.create_display_section()
         self.create_resolution_section()
-        self.create_advanced_section()
+        self.create_timing_section()
         self.create_preview_section()
         self.create_action_section()
-        
-        # Initialize state
-        self.last_valid_width = "1280"
-        self.last_valid_height = "1024"
-        self.last_valid_refresh = "165"
-        
-        # Generate initial preview
+
         self.generate_preview()
-        
-        # Bind validation and preview update
         self.bind_validators()
 
+    # -- environment ---------------------------------------------------------
+
+    def create_environment_section(self):
+        env = self.env
+        frame = ttk.LabelFrame(self.main_frame, text="Environment", padding=5)
+        frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        frame.grid_columnconfigure(0, weight=1)
+
+        session = env.session_type.upper() if env.session_type != "unknown" else "unknown session"
+        comp = env.compositor
+        if env.compositor_version:
+            comp += " " + ".".join(str(x) for x in env.compositor_version[:2])
+        drivers = ", ".join(env.drivers) or "unknown"
+        summary = f"{session} · {comp} · GPU: {drivers} · kernel {env.kernel_release}"
+        ttk.Label(frame, text=summary).grid(row=0, column=0, sticky="w", padx=5)
+
+        paths = detect.describe_paths(env)
+        lbl = ttk.Label(frame, text=paths, wraplength=780, foreground="#555555")
+        lbl.grid(row=1, column=0, sticky="w", padx=5, pady=(3, 0))
+        self._paths_label = lbl
+
+    # -- display selection ----------------------------------------------------
+
     def create_display_section(self):
-        display_frame = ttk.LabelFrame(self.main_frame, text="Display Selection", padding=5)
-        display_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        
+        frame = ttk.LabelFrame(self.main_frame, text="Display Selection", padding=5)
+        frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        frame.grid_columnconfigure(0, weight=1)
+
         self.displays = self.get_displays()
         self.display_var = tk.StringVar(value=self.displays[0] if self.displays else "")
-        
-        display_combo = ttk.Combobox(display_frame, 
-                                   textvariable=self.display_var,
-                                   values=self.displays,
-                                   state="readonly")
-        display_combo.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
-        display_frame.grid_columnconfigure(0, weight=1)
+        combo = ttk.Combobox(frame, textvariable=self.display_var,
+                             values=self.displays, state="readonly")
+        combo.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+        combo.bind('<<ComboboxSelected>>', lambda e: self.generate_preview())
 
-        # Refresh button to get current resolution
-        ttk.Button(display_frame, text="Get Current Settings", command=self.get_current_resolution).grid(row=0, column=1, padx=5, pady=5)
-
-        display_combo.bind('<<ComboboxSelected>>', lambda e: self.generate_preview())
-
-    def create_resolution_section(self):
-        res_frame = ttk.LabelFrame(self.main_frame, text="Resolution Settings", padding=5)
-        res_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        res_frame.grid_columnconfigure(1, weight=1)
-        
-        # Resolution inputs
-        ttk.Label(res_frame, text="Width:").grid(row=0, column=0, padx=5, pady=5)
-        self.width_var = tk.StringVar(value="1280")
-        width_entry = ttk.Entry(res_frame, textvariable=self.width_var, width=8)
-        width_entry.grid(row=0, column=1, sticky="w", padx=5, pady=5)
-        
-        ttk.Label(res_frame, text="Height:").grid(row=1, column=0, padx=5, pady=5)
-        self.height_var = tk.StringVar(value="1024")
-        height_entry = ttk.Entry(res_frame, textvariable=self.height_var, width=8)
-        height_entry.grid(row=1, column=1, sticky="w", padx=5, pady=5)
-        
-        ttk.Label(res_frame, text="Refresh Rate:").grid(row=2, column=0, padx=5, pady=5)
-        self.refresh_var = tk.StringVar(value="165")
-        refresh_entry = ttk.Entry(res_frame, textvariable=self.refresh_var, width=8)
-        refresh_entry.grid(row=2, column=1, sticky="w", padx=5, pady=5)
-        
-        ttk.Label(res_frame, text="pixels").grid(row=0, column=2, sticky="w", padx=5)
-        ttk.Label(res_frame, text="pixels").grid(row=1, column=2, sticky="w", padx=5)
-        ttk.Label(res_frame, text="Hz").grid(row=2, column=2, sticky="w", padx=5)
-
-    def get_current_resolution(self):
-        """Get current resolution and refresh rate of the selected display"""
-        try:
-            display = self.display_var.get()
-            output = subprocess.check_output(['xrandr', '--verbose'], universal_newlines=True)
-            for line in output.splitlines():
-                if display in line and "*current" in line:
-                    match = re.search(r'(\d+)x(\d+).*?([\d\.]+)\*', line)
-                    if match:
-                        self.width_var.set(match.group(1))
-                        self.height_var.set(match.group(2))
-                        self.refresh_var.set(match.group(3))
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to get current resolution: {str(e)}")
-
-    def create_advanced_section(self):
-        adv_frame = ttk.LabelFrame(self.main_frame, text="Advanced Settings", padding=5)
-        adv_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        adv_frame.grid_columnconfigure(0, weight=1)
-        
-        # Create a sub-frame for options to control layout
-        options_frame = ttk.Frame(adv_frame)
-        options_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
-        options_frame.grid_columnconfigure(0, weight=1)
-        
-        # Timing options
-        self.reduced_blanking = tk.BooleanVar(value=True)
-        rb_check = ttk.Checkbutton(options_frame, 
-                                 text="Use Reduced Blanking (recommended for high refresh rates)",
-                                 variable=self.reduced_blanking,
-                                 command=self.generate_preview)
-        rb_check.grid(row=0, column=0, sticky="w", pady=(0, 5))
-        
-        self.force_enable = tk.BooleanVar(value=True)
-        fe_check = ttk.Checkbutton(options_frame,
-                                 text="Force Enable Mode (override EDID restrictions)",
-                                 variable=self.force_enable,
-                                 command=self.generate_preview)
-        fe_check.grid(row=1, column=0, sticky="w")
-
-    def create_preview_section(self):
-        preview_frame = ttk.LabelFrame(self.main_frame, text="Configuration Preview", padding=5)
-        preview_frame.grid(row=3, column=0, sticky="nsew", pady=(0, 10))
-        preview_frame.grid_columnconfigure(0, weight=1)
-        preview_frame.grid_rowconfigure(0, weight=1)
-        
-        self.preview_text = tk.Text(preview_frame, height=12, wrap=tk.NONE)
-        self.preview_text.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-        
-        # Add scrollbars
-        y_scroll = ttk.Scrollbar(preview_frame, orient="vertical", 
-                               command=self.preview_text.yview)
-        y_scroll.grid(row=0, column=1, sticky="ns")
-        x_scroll = ttk.Scrollbar(preview_frame, orient="horizontal",
-                               command=self.preview_text.xview)
-        x_scroll.grid(row=1, column=0, sticky="ew")
-        
-        self.preview_text.configure(yscrollcommand=y_scroll.set,
-                                  xscrollcommand=x_scroll.set)
-
-    def create_action_section(self):
-        button_frame = ttk.Frame(self.main_frame)
-        button_frame.grid(row=4, column=0, sticky="ew", pady=(0, 5))
-        button_frame.grid_columnconfigure(1, weight=1)
-        
-        ttk.Button(button_frame, 
-                  text="Generate Preview",
-                  command=self.generate_preview).grid(row=0, column=0, padx=5)
-        
-        ttk.Button(button_frame,
-                  text="Apply Configuration",
-                  command=self.apply_configuration).grid(row=0, column=2, padx=5)
-        
-        # Status label
-        self.status_var = tk.StringVar()
-        status_label = ttk.Label(self.main_frame, 
-                               textvariable=self.status_var,
-                               wraplength=600)
-        status_label.grid(row=5, column=0, sticky="ew", pady=5)
-
-    def bind_validators(self):
-        def validate_number(var, old_value):
-            def callback(*args):
-                try:
-                    value = var.get().strip()
-                    if value:
-                        int_val = int(value)
-                        if int_val <= 0:
-                            var.set(old_value)
-                        else:
-                            self.generate_preview()
-                except ValueError:
-                    var.set(old_value)
-            return callback
-        
-        self.width_var.trace_add("write", validate_number(self.width_var, self.last_valid_width))
-        self.height_var.trace_add("write", validate_number(self.height_var, self.last_valid_height))
-        self.refresh_var.trace_add("write", validate_number(self.refresh_var, self.last_valid_refresh))
+        ttk.Button(frame, text="Get Current Settings",
+                   command=self.get_current_resolution).grid(row=0, column=1, padx=5, pady=5)
 
     def get_displays(self):
-        """Get list of connected displays"""
-        try:
-            # Use xrandr -q instead of --listmonitors for more reliable output
-            output = subprocess.check_output(['xrandr', '-q'],
-                                          universal_newlines=True,
-                                          stderr=subprocess.PIPE)
-            
-            # Find all connected displays
-            # Match lines like "HDMI-0 connected" but not when prefixed with +
-            displays = []
-            for line in output.splitlines():
-                if ' connected ' in line and not line.startswith('+'):
-                    display = line.split()[0]
-                    if display not in displays:  # Avoid duplicates
-                        displays.append(display)
-            
-            return displays if displays else ["HDMI-0"]
-        except subprocess.CalledProcessError:
-            return ["HDMI-0"]
-
-    def calculate_modeline(self):
-        """Calculate modeline parameters based on resolution and refresh rate"""
-        width = int(self.width_var.get())
-        height = int(self.height_var.get())
-        refresh = float(self.refresh_var.get())
-        
-        if self.reduced_blanking.get():
-            # Conservative reduced blanking parameters
-            h_front = max(16, width // 100)
-            h_sync = max(32, width // 80)
-            h_back = max(48, width // 50)
-            
-            v_front = 1
-            v_sync = 1
-            v_back = max(3, height // 200)
-            
-            h_total = width + h_front + h_sync + h_back
-            v_total = height + v_front + v_sync + v_back
-            
-            pixel_clock = h_total * v_total * refresh / 1000000  # MHz
-            
-            return (f"{pixel_clock:.2f} {width} {width + h_front} "
-                   f"{width + h_front + h_sync} {h_total} "
-                   f"{height} {height + v_front} "
-                   f"{height + v_front + v_sync} {v_total} "
-                   f"-HSync +VSync")
-        else:
-            # Standard CVT parameters
+        """Output names: xrandr names on X11, DRM connector names on Wayland."""
+        if self.env.session_type == "x11":
+            names = []
             try:
-                cvt = subprocess.check_output(
-                    ['cvt', str(width), str(height), str(refresh)],
-                    universal_newlines=True
-                )
-                modeline = re.search(r'Modeline.*"(.*)"(.*)', cvt)
-                if modeline:
-                    return modeline.group(2).strip()
-            except subprocess.CalledProcessError:
-                return None
+                out = subprocess.check_output(['xrandr', '-q'], universal_newlines=True,
+                                              stderr=subprocess.DEVNULL)
+                for line in out.splitlines():
+                    if ' connected' in line:
+                        names.append(line.split()[0])
+            except (OSError, subprocess.SubprocessError):
+                pass
+            if names:
+                return names
+        connected = [c.name for c in self.env.connected_connectors()]
+        others = [c.name for c in self.env.connectors if c.status != "connected"]
+        return connected + others if (connected or others) else ["DP-1"]
+
+    def get_current_resolution(self):
+        if self.env.session_type != "x11":
+            messagebox.showinfo(
+                "Not available",
+                "Reading the current mode via xrandr only works on X11.\n"
+                "On Wayland, check your compositor's display settings.")
+            return
+        try:
+            current = self._current_mode(self.display_var.get())
+            if not current:
+                raise RuntimeError("no active mode found for this output")
+            mode, rate = current
+            w, _, h = mode.partition('x')
+            self.width_var.set(w)
+            self.height_var.set(h)
+            self.refresh_var.set(rate)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to get current resolution: {e}")
+
+    # -- resolution inputs ------------------------------------------------------
+
+    def create_resolution_section(self):
+        frame = ttk.LabelFrame(self.main_frame, text="Resolution Settings", padding=5)
+        frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+
+        self.width_var = tk.StringVar(value="1920")
+        self.height_var = tk.StringVar(value="1080")
+        self.refresh_var = tk.StringVar(value="75")
+
+        for row, (label, var, unit) in enumerate([
+                ("Width:", self.width_var, "pixels"),
+                ("Height:", self.height_var, "pixels"),
+                ("Refresh Rate:", self.refresh_var, "Hz")]):
+            ttk.Label(frame, text=label).grid(row=row, column=0, padx=5, pady=4, sticky="e")
+            ttk.Entry(frame, textvariable=var, width=10).grid(row=row, column=1,
+                                                              sticky="w", padx=5)
+            ttk.Label(frame, text=unit).grid(row=row, column=2, sticky="w", padx=5)
+
+    def bind_validators(self):
+        for var in (self.width_var, self.height_var, self.refresh_var):
+            var.trace_add("write", lambda *a: self.generate_preview())
+
+    def read_inputs(self):
+        """Returns (width, height, refresh) or raises ValueError."""
+        w = int(self.width_var.get().strip())
+        h = int(self.height_var.get().strip())
+        r = float(self.refresh_var.get().strip())
+        if w <= 0 or h <= 0 or r <= 0:
+            raise ValueError("width/height/refresh must be positive")
+        return w, h, r
+
+    # -- timing options ----------------------------------------------------------
+
+    def create_timing_section(self):
+        frame = ttk.LabelFrame(self.main_frame, text="Timing Standard", padding=5)
+        frame.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+
+        self.standard_var = tk.StringVar(value="cvt-rb2")
+        options = [
+            ("CVT-RBv2 (recommended: lowest pixel clock, any refresh)", "cvt-rb2"),
+            ("CVT-RB (reduced blanking v1, matches `cvt -r`)", "cvt-rb"),
+            ("CVT (full blanking, CRT-era)", "cvt"),
+        ]
+        for i, (label, value) in enumerate(options):
+            ttk.Radiobutton(frame, text=label, variable=self.standard_var, value=value,
+                            command=self.generate_preview).grid(row=i, column=0,
+                                                                sticky="w", padx=5)
+
+        if self.env.has_nvidia_proprietary and self.env.session_type == "x11":
+            self.relax_validation = tk.BooleanVar(value=False)
+            ttk.Checkbutton(
+                frame,
+                text="Relax NVIDIA mode validation (overclocking: skip EDID "
+                     "pixel-clock/sync-range checks)",
+                variable=self.relax_validation,
+                command=self.generate_preview).grid(row=len(options), column=0,
+                                                    sticky="w", padx=5, pady=(6, 0))
+        else:
+            self.relax_validation = tk.BooleanVar(value=False)
+
+    # -- preview -------------------------------------------------------------------
+
+    def create_preview_section(self):
+        frame = ttk.LabelFrame(self.main_frame, text="Configuration Preview", padding=5)
+        frame.grid(row=4, column=0, sticky="nsew", pady=(0, 10))
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_rowconfigure(0, weight=1)
+
+        self.preview_text = tk.Text(frame, height=14, wrap=tk.NONE)
+        self.preview_text.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        y = ttk.Scrollbar(frame, orient="vertical", command=self.preview_text.yview)
+        y.grid(row=0, column=1, sticky="ns")
+        x = ttk.Scrollbar(frame, orient="horizontal", command=self.preview_text.xview)
+        x.grid(row=1, column=0, sticky="ew")
+        self.preview_text.configure(yscrollcommand=y.set, xscrollcommand=x.set)
+
+    def current_modeline(self):
+        w, h, r = self.read_inputs()
+        ml = timings.calc(w, h, r, self.standard_var.get())
+        name = f"{w}x{h}_{r:g}"
+        return name, ml
 
     def generate_preview(self):
-        """Generate configuration preview"""
         try:
-            mode_name = f"{self.width_var.get()}x{self.height_var.get()}_{self.refresh_var.get()}"
-            modeline = self.calculate_modeline()
-            
-            if not modeline:
-                raise ValueError("Failed to calculate modeline parameters")
-            
-            force_options = """
-    Option "ModeValidation" "AllowNonEdidModes,NoMaxPClkCheck,NoEdidMaxPClkCheck,NoMaxSizeCheck,NoHorizSyncCheck,NoVertRefreshCheck"
-    Option "IgnoreEDID" "True\"""" if self.force_enable.get() else ""
-            
-            config = f"""# Generated by Linux CRU on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            name, ml = self.current_modeline()
+        except ValueError:
+            return  # incomplete input while typing
+        out = self.display_var.get()
 
-Section "Monitor"
-    Identifier "{self.display_var.get()}"
-    Option "PreferredMode" "{mode_name}"
-    Modeline "{mode_name}" {modeline}
-    Option "ExactModeTimingsDVI" "True"{force_options}
-EndSection
+        header = (f"# {name} — {ml.clock_mhz:.3f} MHz pixel clock, "
+                  f"actual {ml.actual_refresh:.3f} Hz "
+                  f"({self.standard_var.get().upper()})\n"
+                  f"# {ml.xorg_modeline(name)}\n\n")
 
-Section "Screen"
-    Identifier "Screen0"
-    Device "Device0"
-    Monitor "{self.display_var.get()}"
-    Option "AllowIndirectGLXProtocol" "off"
-    Option "TripleBuffer" "on"
-EndSection
+        if self.env.session_type == "x11":
+            body = self.build_x11_preview(out, name, ml)
+        elif self.env.session_type == "wayland":
+            body = self.build_wayland_preview(out, name, ml)
+        else:
+            body = "Could not determine session type; showing raw modeline only.\n"
 
-# Kernel module configuration (/etc/modprobe.d/nvidia.conf):
-options nvidia NVreg_RegistryDwords="CustomEDID={mode_name};EnableBrightnessControl=1"
-"""
-            self.preview_text.delete(1.0, tk.END)
-            self.preview_text.insert(1.0, config)
-            
-            # Update status
-            self.status_var.set("Configuration generated successfully. Click 'Apply Configuration' to use these settings.")
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to generate configuration: {str(e)}")
-            self.status_var.set("Error: Failed to generate configuration")
+        self.preview_text.delete(1.0, tk.END)
+        self.preview_text.insert(1.0, header + body)
+        self.status_var.set("Preview generated. Use Test Mode to try it live, "
+                            "Apply to persist." if self.env.session_type == "x11"
+                            else "Preview generated — see the commands above for your compositor.")
+
+    def build_x11_preview(self, out, name, ml):
+        parts = ["## Live test (what the Test Mode button runs):\n",
+                 f"xrandr --newmode \"{name}\" {ml.timing_string()}\n",
+                 f"xrandr --addmode {out} \"{name}\"\n",
+                 f"xrandr --output {out} --mode \"{name}\"\n\n",
+                 "## Persistent config (what Apply writes to "
+                 "/etc/X11/xorg.conf.d/10-linux-cru.conf):\n\n",
+                 self.build_xorg_config(out, name, ml)]
+        return "".join(parts)
+
+    def build_xorg_config(self, out, name, ml):
+        env = self.env
+        conf = [f"# Generated by Linux CRU on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n",
+                'Section "Monitor"\n',
+                f'    Identifier "{out}"\n',
+                f'    {ml.xorg_modeline(name)}\n',
+                f'    Option "PreferredMode" "{name}"\n',
+                'EndSection\n']
+        if env.has_nvidia_proprietary:
+            flags = ["AllowNonEdidModes"]
+            if self.relax_validation.get():
+                flags += ["NoEdidMaxPClkCheck", "NoMaxPClkCheck",
+                          "NoHorizSyncCheck", "NoVertRefreshCheck"]
+            conf += ['\nSection "Device"\n',
+                     '    Identifier "LinuxCRU-nvidia"\n',
+                     '    Driver "nvidia"\n',
+                     f'    Option "Monitor-{out}" "{out}"\n',
+                     f'    Option "ModeValidation" "{", ".join(flags)}"\n',
+                     '    Option "ModeDebug" "true"\n',
+                     'EndSection\n']
+        return "".join(conf)
+
+    def build_wayland_preview(self, out, name, ml):
+        env = self.env
+        w, h, r = self.read_inputs()
+
+        if env.has_nvidia_proprietary:
+            return self._edid_override_notes(out, name, ml,
+                reason="The NVIDIA driver rejects all compositor-injected custom modes "
+                       "on Wayland — the kernel EDID override is the only working path.")
+
+        if env.compositor == "sway":
+            return ("## Sway — run now:\n"
+                    f"swaymsg 'output {out} modeline {ml.timing_string()}'\n\n"
+                    "## Persist — add to ~/.config/sway/config:\n"
+                    f"output {out} modeline {ml.timing_string()}\n")
+
+        if env.compositor == "hyprland":
+            return ("## Hyprland — run now:\n"
+                    f"hyprctl keyword monitor \"{out}, modeline {ml.timing_string()}, 0x0, 1\"\n\n"
+                    "## Persist — add to ~/.config/hypr/hyprland.conf:\n"
+                    f"monitor = {out}, modeline {ml.timing_string()}, 0x0, 1\n")
+
+        if env.compositor == "kwin":
+            if env.kde_custom_modes_available:
+                mhz = int(round(r * 1000))
+                blanking = "full" if self.standard_var.get() == "cvt" else "reduced"
+                return ("## KDE Plasma ≥ 6.6 — two steps (not atomic):\n"
+                        f"kscreen-doctor output.{out}.addCustomMode.{w}.{h}.{mhz}.{blanking}\n"
+                        f"kscreen-doctor output.{out}.mode.{w}x{h}@{r:g}\n\n"
+                        "# Note: KWin computes CVT timings itself (libxcvt) — the modeline\n"
+                        "# above is informative; exact custom timings need an EDID override.\n")
+            return self._edid_override_notes(out, name, ml,
+                reason=f"KDE Plasma {'.'.join(map(str, env.compositor_version[:2])) or '?'} "
+                       "predates custom-mode support (needs ≥ 6.6).")
+
+        if env.is_wlroots_family:
+            return (f"## {env.compositor} (wlroots) — run now:\n"
+                    f"wlr-randr --output {out} --custom-mode {w}x{h}@{r:g}Hz\n\n"
+                    "# wlr-randr asks the compositor for CVT (full-blanking) timings.\n"
+                    "# For exact custom timings, use an EDID override.\n")
+
+        return self._edid_override_notes(out, name, ml,
+            reason=f"{env.compositor} offers no compositor-level custom modes.")
+
+    def _edid_override_notes(self, out, name, ml, reason):
+        conn = self._drm_connector_for(out)
+        tool = self.env.initramfs_tool or "your initramfs tool"
+        return (f"## EDID override required — {reason}\n\n"
+                "# The universal Wayland path (GUI support coming to this tool):\n"
+                f"#  1. Dump the current EDID:  cat /sys/class/drm/{conn}/edid > mon.bin\n"
+                f"#  2. Add this timing as a DTD/DisplayID block (wxEDID, or Windows CRU export):\n"
+                f"#       {ml.xorg_modeline(name)}\n"
+                "#  3. Install: sudo install -Dm644 custom.bin /usr/lib/firmware/edid/custom.bin\n"
+                f"#  4. Kernel cmdline: drm.edid_firmware={self._strip_card(conn)}:edid/custom.bin\n"
+                f"#  5. Embed in initramfs ({tool}), then reboot.\n"
+                "# Runtime test first (root):\n"
+                f"#   cat custom.bin > /sys/kernel/debug/dri/<N>/{self._strip_card(conn)}/edid_override\n"
+                f"#   echo 1 > /sys/kernel/debug/dri/<N>/{self._strip_card(conn)}/trigger_hotplug\n"
+                "# See docs/RESEARCH.md in the Linux CRU repo for the full recipe.\n")
+
+    def _drm_connector_for(self, out):
+        for c in self.env.connectors:
+            if c.name == out:
+                return f"{c.card}-{c.name}"
+        return f"cardX-{out}"
+
+    @staticmethod
+    def _strip_card(conn):
+        return conn.partition("-")[2] if conn.startswith("card") else conn
+
+    # -- actions --------------------------------------------------------------------
+
+    def create_action_section(self):
+        frame = ttk.Frame(self.main_frame)
+        frame.grid(row=5, column=0, sticky="ew", pady=(0, 5))
+        frame.grid_columnconfigure(1, weight=1)
+
+        ttk.Button(frame, text="Generate Preview",
+                   command=self.generate_preview).grid(row=0, column=0, padx=5)
+
+        self.test_btn = ttk.Button(frame, text=f"Test Mode ({TEST_REVERT_SECONDS}s auto-revert)",
+                                   command=self.test_mode)
+        self.test_btn.grid(row=0, column=2, padx=5)
+
+        self.apply_btn = ttk.Button(frame, text="Apply Configuration",
+                                    command=self.apply_configuration)
+        self.apply_btn.grid(row=0, column=3, padx=5)
+
+        if self.env.session_type != "x11":
+            self.test_btn.state(["disabled"])
+
+        self.status_var = tk.StringVar()
+        ttk.Label(self.main_frame, textvariable=self.status_var,
+                  wraplength=780).grid(row=6, column=0, sticky="ew", pady=5)
+
+    # -- live test (X11) ---------------------------------------------------------
+
+    def _xrandr(self, *args):
+        return subprocess.run(['xrandr'] + list(args), capture_output=True,
+                              universal_newlines=True)
+
+    def _current_mode(self, out):
+        """(mode_name, rate) currently active on `out`, or None."""
+        res = self._xrandr('-q')
+        if res.returncode != 0:
+            return None
+        in_block = False
+        for line in res.stdout.splitlines():
+            if not line.startswith((' ', '\t')):
+                in_block = line.split()[0] == out if line.split() else False
+                continue
+            if in_block and '*' in line:
+                tokens = line.split()
+                mode = tokens[0]
+                for tok in tokens[1:]:
+                    if '*' in tok:
+                        return mode, tok.replace('*', '').replace('+', '')
+        return None
+
+    def _cleanup_test_mode(self, out, name):
+        self._xrandr('--delmode', out, name)
+        self._xrandr('--rmmode', name)
+
+    def test_mode(self):
+        if self.env.session_type != "x11":
+            messagebox.showinfo("X11 only",
+                                "Live testing via xrandr only works on X11.\n"
+                                "Use the compositor commands from the preview instead.")
+            return
+        try:
+            name, ml = self.current_modeline()
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid input: {e}")
+            return
+        name += "_test"
+        out = self.display_var.get()
+        previous = self._current_mode(out)
+
+        res = self._xrandr('--newmode', name, *ml.xrandr_args())
+        if res.returncode != 0 and 'already' not in res.stderr.lower():
+            messagebox.showerror("Error", f"xrandr --newmode failed:\n{res.stderr}")
+            return
+
+        res = self._xrandr('--addmode', out, name)
+        if res.returncode != 0:
+            self._xrandr('--rmmode', name)
+            hint = ""
+            if self.env.has_nvidia_proprietary:
+                hint = ("\n\nOn NVIDIA this usually means ModeValidation is not relaxed "
+                        "yet: click Apply Configuration first, restart X, then test.")
+            messagebox.showerror("Error", f"xrandr --addmode failed (driver rejected the "
+                                          f"mode):\n{res.stderr}{hint}")
+            return
+
+        res = self._xrandr('--output', out, '--mode', name)
+        if res.returncode != 0:
+            self._cleanup_test_mode(out, name)
+            messagebox.showerror(
+                "Error",
+                f"Could not switch to the mode:\n{res.stderr}\n\n"
+                "'Configure crtc failed' usually means the pixel clock exceeds the "
+                "link/EDID limit — try CVT-RBv2 or a lower refresh rate. Check dmesg.")
+            return
+
+        self._show_revert_dialog(out, name, previous)
+
+    def _show_revert_dialog(self, out, name, previous):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Testing mode")
+        dialog.geometry("420x140")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        remaining = tk.IntVar(value=TEST_REVERT_SECONDS)
+        label = ttk.Label(dialog, justify="center",
+                          text="")
+        label.pack(pady=12)
+
+        state = {"done": False}
+
+        def revert():
+            if state["done"]:
+                return
+            state["done"] = True
+            if previous:
+                self._xrandr('--output', out, '--mode', previous[0], '--rate', previous[1])
+            else:
+                self._xrandr('--output', out, '--auto')
+            self._cleanup_test_mode(out, name)
+            dialog.destroy()
+            self.status_var.set("Reverted to previous mode.")
+
+        def keep():
+            if state["done"]:
+                return
+            state["done"] = True
+            dialog.destroy()
+            self.status_var.set(f"Mode kept for this session. Apply Configuration to "
+                                f"persist it across restarts.")
+
+        def tick():
+            if state["done"]:
+                return
+            n = remaining.get()
+            label.config(text=f"Custom mode is active on {out}.\n\n"
+                              f"Reverting in {n} second(s) unless you keep it.\n"
+                              f"(Press Enter to keep)")
+            if n <= 0:
+                revert()
+                return
+            remaining.set(n - 1)
+            dialog.after(1000, tick)
+
+        btns = ttk.Frame(dialog)
+        btns.pack(pady=6)
+        keep_btn = ttk.Button(btns, text="Keep", command=keep)
+        keep_btn.pack(side=tk.LEFT, padx=8)
+        ttk.Button(btns, text="Revert now", command=revert).pack(side=tk.LEFT, padx=8)
+        dialog.bind('<Return>', lambda e: keep())
+        keep_btn.focus()
+        tick()
+
+    # -- persist (X11) -------------------------------------------------------------
 
     def apply_configuration(self):
-        """Apply the configuration to the system using graphical sudo"""
+        if self.env.session_type != "x11":
+            messagebox.showinfo(
+                "Wayland",
+                "Persisting on Wayland uses compositor config or a kernel EDID "
+                "override — see the commands in the preview. A built-in EDID "
+                "backend is the next milestone for this tool.")
+            return
         try:
-            config = self.preview_text.get(1.0, tk.END)
-            xorg_config = config.split("# Kernel module configuration")[0].strip()
-            nvidia_config = "options nvidia " + config.split("options nvidia ")[1].strip()
-            
-            # Create temporary directory with random suffix for safety
-            tmp_dir = f"/tmp/linux_cru_{os.getpid()}"
-            os.makedirs(tmp_dir, exist_ok=True)
-            
-            # Write configuration files
-            with open(f"{tmp_dir}/xorg.conf", 'w') as f:
-                f.write(xorg_config)
-            with open(f"{tmp_dir}/nvidia.conf", 'w') as f:
-                f.write(nvidia_config)
-            
-            # Create helper script
-            script_path = f"{tmp_dir}/apply_config.sh"
-            with open(script_path, 'w') as f:
-                f.write("""#!/bin/bash
-set -e
-mkdir -p /etc/X11/xorg.conf.d
-cp "${1}/xorg.conf" /etc/X11/xorg.conf.d/10-custom-modes.conf
-cp "${1}/nvidia.conf" /etc/modprobe.d/nvidia.conf
-chmod 644 /etc/X11/xorg.conf.d/10-custom-modes.conf
-chmod 644 /etc/modprobe.d/nvidia.conf
+            name, ml = self.current_modeline()
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid input: {e}")
+            return
+        out = self.display_var.get()
+        config = self.build_xorg_config(out, name, ml)
 
-# Check for mkinitcpio or dracut and update initramfs
-if command -v mkinitcpio >/dev/null 2>&1; then
-    mkinitcpio -P
-elif command -v dracut >/dev/null 2>&1; then
-    dracut --force
-elif command -v update-initramfs >/dev/null 2>&1; then
-    update-initramfs -u
-else
-    echo "Warning: Could not find mkinitcpio, dracut, or update-initramfs. Initramfs not updated."
-fi
-""")
-            os.chmod(script_path, 0o755)
+        tmp_dir = f"/tmp/linux_cru_{os.getpid()}"
+        os.makedirs(tmp_dir, exist_ok=True)
+        conf_path = os.path.join(tmp_dir, "10-linux-cru.conf")
+        with open(conf_path, 'w') as f:
+            f.write(config)
 
-            # Run helper script with sudo
-            success, message = run_with_sudo(['/bin/bash', script_path, tmp_dir])
-            
-            # Cleanup temporary files
-            try:
-                shutil.rmtree(tmp_dir)
-            except:
-                pass
-            
-            if success:
-                restart = messagebox.askquestion("Success",
-                                               "Configuration applied successfully.\n\n"
-                                               "Would you like to restart the display manager now?\n"
-                                               "(This will close all applications and log you out)",
-                                               icon='info')
-                if restart == 'yes':
-                    run_with_sudo(['systemctl', 'restart', 'display-manager'])
-                else:
-                    messagebox.showinfo("Success",
-                                      "Configuration saved. The changes will take effect\n"
-                                      "after you restart your display manager or reboot.")
-            else:
-                raise Exception(message)
-            
-        except Exception as e:
-            messagebox.showerror("Error",
-                               f"Failed to apply configuration:\n{str(e)}\n\n"
-                               "Make sure you have administrator privileges and "
-                               "the required dependencies are installed.")
-            self.status_var.set("Error: Failed to apply configuration")
+        script_path = os.path.join(tmp_dir, "apply.sh")
+        with open(script_path, 'w') as f:
+            f.write("#!/bin/bash\n"
+                    "set -e\n"
+                    "mkdir -p /etc/X11/xorg.conf.d\n"
+                    f"cp '{conf_path}' /etc/X11/xorg.conf.d/10-linux-cru.conf\n"
+                    "chmod 644 /etc/X11/xorg.conf.d/10-linux-cru.conf\n")
+        os.chmod(script_path, 0o755)
+
+        success, message = run_with_sudo(['/bin/bash', script_path])
+        try:
+            import shutil
+            shutil.rmtree(tmp_dir)
+        except OSError:
+            pass
+
+        if success:
+            messagebox.showinfo(
+                "Success",
+                "Configuration written to /etc/X11/xorg.conf.d/10-linux-cru.conf.\n\n"
+                "It takes effect on the next X restart (log out and back in).\n"
+                "To undo: delete that file.")
+            self.status_var.set("Configuration applied.")
+        else:
+            messagebox.showerror("Error", f"Failed to apply configuration:\n{message}")
+            self.status_var.set("Error: failed to apply configuration.")
+
 
 def main():
     root = tk.Tk()
-    app = LinuxCRU(root)
+    LinuxCRU(root)
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()
