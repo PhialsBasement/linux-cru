@@ -189,16 +189,27 @@ class LinuxCRU:
                             command=self.generate_preview).grid(row=i, column=0,
                                                                 sticky="w", padx=5)
 
+        row = len(options)
+        self.relax_validation = tk.BooleanVar(value=False)
         if self.env.has_nvidia_proprietary and self.env.session_type == "x11":
-            self.relax_validation = tk.BooleanVar(value=False)
             ttk.Checkbutton(
                 frame,
                 text="Skip NVIDIA EDID and pixel clock checks (needed for overclocking)",
                 variable=self.relax_validation,
-                command=self.generate_preview).grid(row=len(options), column=0,
+                command=self.generate_preview).grid(row=row, column=0,
                                                     sticky="w", padx=5, pady=(6, 0))
-        else:
-            self.relax_validation = tk.BooleanVar(value=False)
+            row += 1
+
+        self.boot_method_var = tk.BooleanVar(value=False)
+        if self.use_edid_method():
+            ttk.Checkbutton(
+                frame,
+                text="Apply from the kernel command line instead of a boot "
+                     "service (needed only for the boot console and login "
+                     "screen; changes your boot configuration)",
+                variable=self.boot_method_var,
+                command=self.generate_preview).grid(row=row, column=0,
+                                                    sticky="w", padx=5, pady=(6, 0))
 
     # -- preview -------------------------------------------------------------------
 
@@ -353,8 +364,10 @@ class LinuxCRU:
         except edid.EdidError as err:
             detail = f"# Warning: could not read the current EDID ({err}).\n"
 
+        method = (persist.METHOD_CMDLINE if self.boot_method_var.get()
+                  else persist.METHOD_SYSTEMD)
         steps = "\n".join(f"#   {i}. {s}" for i, s in
-                          enumerate(persist.describe_plan(short), 1))
+                          enumerate(persist.describe_plan(short, method), 1))
         installed = persist.installed_connectors()
         state = ("# Currently installed overrides: "
                  + (", ".join(installed) if installed else "none") + "\n")
@@ -367,7 +380,7 @@ class LinuxCRU:
                 "# Test Mode applies it immediately (needs root, no reboot) and\n"
                 "# reverts automatically unless you keep it.\n"
                 "#\n"
-                "# Apply Configuration makes it permanent:\n"
+                f"# Apply Configuration makes it permanent ({method}):\n"
                 f"{steps}\n"
                 "#\n"
                 f"{state}"
@@ -506,14 +519,24 @@ class LinuxCRU:
             messagebox.showerror("Error", f"Could not build the EDID:\n{e}")
             return
 
-        steps = "\n".join(f"  {i}. {s}"
-                          for i, s in enumerate(persist.describe_plan(connector), 1))
+        method = (persist.METHOD_CMDLINE if self.boot_method_var.get()
+                  else persist.METHOD_SYSTEMD)
+        steps = "\n".join(f"  {i}. {s}" for i, s in
+                          enumerate(persist.describe_plan(connector, method), 1))
+
+        if method == persist.METHOD_CMDLINE:
+            warning = ("\nThis changes your boot configuration. If the display "
+                       "ever fails to come up, remove the drm.edid_firmware "
+                       "parameter from the kernel command line in your "
+                       "bootloader menu.\n")
+        else:
+            warning = ("\nYour boot configuration is not touched, so this "
+                       "cannot stop the machine from booting.\n")
+
         if not messagebox.askyesno(
                 "Make permanent",
-                f"This will make the override load at every boot:\n\n{steps}\n\n"
-                "Test the mode first if you have not. If the display ever fails "
-                "to come up, remove the drm.edid_firmware parameter from the "
-                "kernel command line in your bootloader menu.\n\nContinue?"):
+                f"This will apply the mode at every boot:\n\n{steps}\n{warning}\n"
+                "Continue?"):
             return
 
         edid_path = os.path.join(self._work_dir(), f"{connector}-persist.bin")
@@ -522,15 +545,18 @@ class LinuxCRU:
         os.chmod(edid_path, 0o644)
 
         ok, message = self._run_root_script(
-            persist.build_install_script(connector, edid_path), "install.sh")
+            persist.build_install_script(connector, edid_path, method),
+            "install.sh")
         self.refresh_remove_button()
         if ok:
+            when = ("It takes effect after a reboot."
+                    if method == persist.METHOD_CMDLINE else
+                    "It is active now and will be reapplied at every boot.")
             messagebox.showinfo(
                 "Installed",
-                f"The mode was added as {placement} and installed.\n\n"
-                "It takes effect after a reboot. Use Remove to undo it.")
-            self.status_var.set("Persistent EDID override installed. "
-                                "Reboot for it to take effect.")
+                f"The mode was added as {placement} and installed.\n\n{when}\n"
+                "Use Remove to undo it.")
+            self.status_var.set(f"Persistent EDID override installed. {when}")
         else:
             messagebox.showerror("Error", f"Installation failed:\n{message}")
 

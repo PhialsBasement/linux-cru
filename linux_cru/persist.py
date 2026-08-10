@@ -1,19 +1,32 @@
 """Persistent EDID overrides.
 
-Installs a patched EDID so the kernel loads it at every boot:
+The patched EDID always goes to
+/usr/lib/firmware/edid/linux-cru-<connector>.bin. There are two ways to
+make the kernel load it at boot:
 
-1. the EDID file goes to /usr/lib/firmware/edid/linux-cru-<connector>.bin
-2. drm.edid_firmware=<connector>:edid/... is added to the kernel command
-   line (GRUB, Limine, or systemd-boot)
-3. the file is added to the initramfs, which is required whenever the
-   GPU driver loads before the root filesystem is mounted
+"systemd" (the default)
+    A oneshot service writes the override into the drm module's
+    edid_firmware parameter and re-probes the connector. The kernel
+    re-reads that parameter on every connector detect, so this is all
+    it takes. The unit is ordered before the display manager, so the
+    desktop still enumerates the display only once, with the patched
+    mode list already in place. Nothing in the boot path is touched, so
+    the worst case is a service that fails and a display that behaves
+    exactly as it did before.
 
-Everything this module writes is namespaced (file names, a marker
-comment in the bootloader config) so uninstalling removes exactly what
-was added and nothing else. The kernel command line entry is rebuilt
-from the set of installed files on every install and uninstall, so
-several displays can be overridden at once without the entries
-fighting each other.
+"cmdline" (for the boot console and the login screen)
+    drm.edid_firmware=... is added to the kernel command line and the
+    EDID file is added to the initramfs (required whenever the GPU
+    driver loads before the root filesystem is mounted). This is the
+    only way to have the mode present at the very first probe, before
+    userspace exists, but a bad EDID here means recovering through the
+    bootloader menu.
+
+Everything written is namespaced (file names, a marker comment in the
+bootloader config) so uninstalling removes exactly what was added. The
+override list is rebuilt from the set of installed files on every
+install and uninstall, so several displays can be overridden at once
+without their entries conflicting.
 """
 
 import glob
@@ -31,6 +44,12 @@ INITRAMFS_TOOLS_HOOK = "/etc/initramfs-tools/hooks/linux-cru"
 GRUB_DEFAULT = "/etc/default/grub"
 LIMINE_DEFAULT = "/etc/default/limine"
 KERNEL_CMDLINE = "/etc/kernel/cmdline"
+
+SYSTEMD_UNIT = "/etc/systemd/system/linux-cru-edid.service"
+SYSTEMD_HELPER = "/usr/lib/linux-cru/apply-edid.sh"
+
+METHOD_SYSTEMD = "systemd"
+METHOD_CMDLINE = "cmdline"
 
 
 def firmware_path(connector):
@@ -87,11 +106,38 @@ def detect_initramfs():
     return "none", ""
 
 
-def describe_plan(connector):
+def installed_method():
+    """Which persistence method is currently installed, or None."""
+    if os.path.exists(SYSTEMD_UNIT):
+        return METHOD_SYSTEMD
+    for path in (LIMINE_DEFAULT, GRUB_DEFAULT):
+        try:
+            with open(path) as f:
+                if MARKER in f.read():
+                    return METHOD_CMDLINE
+        except OSError:
+            pass
+    try:
+        with open(KERNEL_CMDLINE) as f:
+            if f"edid/{FILE_PREFIX}" in f.read():
+                return METHOD_CMDLINE
+    except OSError:
+        pass
+    return None
+
+
+def describe_plan(connector, method=METHOD_SYSTEMD):
     """Human-readable list of what installing will change."""
-    boot, boot_detail = detect_bootloader()
-    initrd, initrd_detail = detect_initramfs()
     steps = [f"Install the EDID to {firmware_path(connector)}"]
+    if method == METHOD_SYSTEMD:
+        steps.append(f"Install a boot service ({SYSTEMD_UNIT}) that applies it "
+                     "before the desktop starts")
+        steps.append("Apply it to the running system now")
+        steps.append("Nothing in the boot path is changed")
+        return steps
+
+    boot, boot_detail = detect_bootloader()
+    initrd, _ = detect_initramfs()
     if boot == "unknown":
         steps.append("Kernel command line: no supported bootloader found, "
                      "you will have to add the parameter yourself")
@@ -112,8 +158,10 @@ def _param_helper():
 FWDIR='{FIRMWARE_DIR}'
 PREFIX='{FILE_PREFIX}'
 
-# Build "drm.edid_firmware=CONN:edid/file.bin,CONN2:..." from installed files.
-cru_param() {{
+# Build "CONN:edid/file.bin,CONN2:..." from the installed files. This is
+# the value of the drm module's edid_firmware parameter; on the kernel
+# command line it is prefixed with "drm.edid_firmware=".
+cru_value() {{
     local parts=""
     local f base conn
     for f in "$FWDIR/$PREFIX"*.bin; do
@@ -124,7 +172,134 @@ cru_param() {{
         if [ -n "$parts" ]; then parts="$parts,"; fi
         parts="$parts$conn:edid/$base"
     done
-    if [ -n "$parts" ]; then printf 'drm.edid_firmware=%s' "$parts"; fi
+    printf '%s' "$parts"
+}}
+
+cru_param() {{
+    local v
+    v=$(cru_value)
+    if [ -n "$v" ]; then printf 'drm.edid_firmware=%s' "$v"; fi
+}}
+
+# Connectors we have EDIDs installed for.
+cru_connectors() {{
+    local f base conn
+    for f in "$FWDIR/$PREFIX"*.bin; do
+        [ -e "$f" ] || continue
+        base=$(basename "$f")
+        conn=${{base#$PREFIX}}
+        printf '%s\\n' "${{conn%.bin}}"
+    done
+}}
+"""
+
+
+def _systemd_snippet():
+    """Shell that regenerates (or removes) the boot-time service."""
+    return f"""
+UNIT='{SYSTEMD_UNIT}'
+HELPER='{SYSTEMD_HELPER}'
+
+write_helper() {{
+    mkdir -p "$(dirname "$HELPER")"
+    cat > "$HELPER" <<'HELPEREOF'
+#!/bin/bash
+# Managed by Linux CRU. Applies the EDID overrides for the installed
+# displays, then re-probes them so the new mode lists are in place
+# before the desktop starts.
+set -u
+FWDIR='@FWDIR@'
+PREFIX='@PREFIX@'
+
+value=""
+for f in "$FWDIR/$PREFIX"*.bin; do
+    [ -e "$f" ] || continue
+    base=$(basename "$f")
+    conn=${{base#$PREFIX}}
+    conn=${{conn%.bin}}
+    [ -n "$value" ] && value="$value,"
+    value="$value$conn:edid/$base"
+done
+[ -n "$value" ] || exit 0
+
+echo "$value" > /sys/module/drm/parameters/edid_firmware
+
+# Re-probe: the driver already detected these connectors (with the
+# original EDID) before the root filesystem was mounted.
+for f in "$FWDIR/$PREFIX"*.bin; do
+    [ -e "$f" ] || continue
+    base=$(basename "$f")
+    conn=${{base#$PREFIX}}
+    conn=${{conn%.bin}}
+    for path in /sys/class/drm/card*-"$conn"; do
+        [ -e "$path/status" ] || continue
+        card=$(basename "$path"); card=${{card%%-*}}
+        minor=$(cut -d: -f2 "/sys/class/drm/$card/dev" 2>/dev/null)
+        if [ -n "$minor" ] && [ -e "/sys/kernel/debug/dri/$minor/$conn/trigger_hotplug" ]; then
+            echo 1 > "/sys/kernel/debug/dri/$minor/$conn/trigger_hotplug" || true
+        else
+            echo detect > "$path/status" || true
+        fi
+    done
+done
+HELPEREOF
+    sed -i "s|@FWDIR@|$FWDIR|g; s|@PREFIX@|$PREFIX|g" "$HELPER"
+    chmod 755 "$HELPER"
+}}
+
+update_systemd() {{
+    if [ -z "$(cru_value)" ]; then
+        if [ -f "$UNIT" ]; then
+            systemctl disable --quiet linux-cru-edid.service 2>/dev/null || true
+            rm -f "$UNIT"
+            systemctl daemon-reload 2>/dev/null || true
+        fi
+        rm -f "$HELPER"
+        rmdir "$(dirname "$HELPER")" 2>/dev/null || true
+        echo "boot service: removed"
+        return 0
+    fi
+
+    write_helper
+    cat > "$UNIT" <<UNITEOF
+[Unit]
+Description=Linux CRU custom display modes
+Documentation=https://github.com/PhialsBasement/linux-cru
+After=local-fs.target systemd-modules-load.service
+Before=display-manager.service graphical.target
+ConditionPathExists=$HELPER
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$HELPER
+
+[Install]
+WantedBy=graphical.target
+UNITEOF
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --quiet linux-cru-edid.service 2>/dev/null || true
+    echo "boot service: installed and enabled"
+}}
+
+apply_now() {{
+    if [ -x "$HELPER" ]; then
+        "$HELPER" && echo "override applied to the running system"
+    fi
+}}
+
+clear_now() {{
+    printf '\\n' > /sys/module/drm/parameters/edid_firmware 2>/dev/null || true
+    local conn path card minor
+    for path in /sys/class/drm/card*-*; do
+        [ -e "$path/status" ] || continue
+        case "$(basename "$path")" in *-Writeback-*) continue;; esac
+        card=$(basename "$path"); conn=${{card#*-}}; card=${{card%%-*}}
+        minor=$(cut -d: -f2 "/sys/class/drm/$card/dev" 2>/dev/null)
+        if [ -n "$minor" ] && [ -e "/sys/kernel/debug/dri/$minor/$conn/trigger_hotplug" ]; then
+            echo 1 > "/sys/kernel/debug/dri/$minor/$conn/trigger_hotplug" 2>/dev/null || true
+        fi
+    done
 }}
 """
 
@@ -269,12 +444,26 @@ HOOKEOF
 """
 
 
-def build_install_script(connector, edid_path):
-    """Root script: install the EDID and make it load at boot."""
+def build_install_script(connector, edid_path, method=METHOD_SYSTEMD,
+                         apply_now=True):
+    """Root script: install the EDID and make it load at boot.
+
+    method: METHOD_SYSTEMD (boot service, nothing in the boot path) or
+    METHOD_CMDLINE (kernel command line plus initramfs).
+    apply_now: also apply it to the running system straight away.
+    """
+    if method == METHOD_CMDLINE:
+        steps = "update_bootloader\nupdate_initramfs_config"
+        closing = ('echo "Done. The override takes effect after a reboot."')
+    else:
+        steps = "update_systemd" + ("\napply_now" if apply_now else "")
+        closing = ('echo "Done. The override is active now and will be '
+                   'reapplied at every boot."')
     return f"""#!/bin/bash
-# linux-cru: install a persistent EDID override for {connector}
+# linux-cru: install a persistent EDID override for {connector} ({method})
 set -e
 {_param_helper()}
+{_systemd_snippet()}
 {_bootloader_update_snippet()}
 {_initramfs_snippet()}
 
@@ -287,34 +476,50 @@ install -d -m 755 "$FWDIR"
 install -m 644 '{edid_path}' '{firmware_path(connector)}'
 echo "installed {firmware_path(connector)}"
 
-update_bootloader
-update_initramfs_config
+{steps}
 
 echo
-echo "Done. The override takes effect after a reboot."
+{closing}
 echo "To undo it, use Remove in Linux CRU."
 """
 
 
 def build_uninstall_script(connector=None):
-    """Root script: remove one connector's override, or all of them."""
+    """Root script: remove one connector's override, or all of them.
+
+    Cleans up whichever method was used: the boot service is always
+    regenerated from what is left, and the kernel command line and
+    initramfs are only touched if this tool put something there.
+    """
     if connector:
         removal = f"rm -f '{firmware_path(connector)}'\n" \
                   f"echo \"removed {firmware_path(connector)}\""
     else:
-        removal = f"rm -f \"$FWDIR/$PREFIX\"*.bin\necho \"removed all Linux CRU EDID files\""
+        removal = 'rm -f "$FWDIR/$PREFIX"*.bin\necho "removed all Linux CRU EDID files"'
     return f"""#!/bin/bash
 # linux-cru: remove persistent EDID override(s)
 set -e
 {_param_helper()}
+{_systemd_snippet()}
 {_bootloader_update_snippet()}
 {_initramfs_snippet()}
 
 {removal}
 
-update_bootloader
-update_initramfs_config
+update_systemd
 
+# Only touch the boot path if this tool changed it.
+if grep -qsF "$MARKER" '{LIMINE_DEFAULT}' '{GRUB_DEFAULT}' 2>/dev/null \\
+   || grep -qs 'edid/{FILE_PREFIX}' '{KERNEL_CMDLINE}' 2>/dev/null \\
+   || ls /boot/loader/entries/*.linux-cru-backup >/dev/null 2>&1; then
+    update_bootloader
+fi
+if [ -f '{MKINITCPIO_DROPIN}' ] || [ -f '{DRACUT_DROPIN}' ] \\
+   || [ -f '{INITRAMFS_TOOLS_HOOK}' ]; then
+    update_initramfs_config
+fi
+
+clear_now
 echo
-echo "Done. The change takes effect after a reboot."
+echo "Done."
 """
