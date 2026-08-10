@@ -19,8 +19,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import tempfile
 
-from linux_cru import (detect, edid, override, persist, privileged, timings,
-                       wayland)
+from linux_cru import (detect, edid, hostenv, override, persist, privileged,
+                       timings, wayland)
 
 TEST_REVERT_SECONDS = 15
 
@@ -152,7 +152,8 @@ class LinuxCRU:
             names = []
             try:
                 out = subprocess.check_output(['xrandr', '-q'], universal_newlines=True,
-                                              stderr=subprocess.DEVNULL)
+                                              stderr=subprocess.DEVNULL,
+                                              env=hostenv.subprocess_env())
                 for line in out.splitlines():
                     if ' connected' in line:
                         names.append(line.split()[0])
@@ -629,7 +630,8 @@ class LinuxCRU:
 
     def _xrandr(self, *args):
         return subprocess.run(['xrandr'] + list(args), capture_output=True,
-                              universal_newlines=True)
+                              universal_newlines=True,
+                              env=hostenv.subprocess_env())
 
     def _current_mode(self, out):
         """(mode_name, rate) currently active on `out`, or None."""

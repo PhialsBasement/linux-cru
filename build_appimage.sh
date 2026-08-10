@@ -1,46 +1,150 @@
 #!/bin/bash
-# build_appimage.sh - Fixed script to build the AppImage for Linux
+# Build the Linux CRU AppImage.
+#
+# Bundles the Python interpreter, the standard library, tkinter and the
+# whole Tcl/Tk runtime, so the result runs on a machine with no Python
+# installed. Shared libraries are resolved with ldd rather than guessed,
+# and the Tcl/Tk script directories are located by asking the
+# interpreter, because distributions disagree about where they live
+# (/usr/lib/tcl8.6 on Arch, /usr/share/tcltk/tcl8.6 on Debian/Ubuntu).
+#
+# The build verifies itself at the end: the bundled interpreter has to
+# import tkinter and the application package with the host's Python
+# hidden from it.
 
-# Get Python version
-PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-PYTHON_LIB_PATH="/usr/lib/python${PYTHON_VERSION}"
+set -euo pipefail
 
-echo "Using Python ${PYTHON_VERSION}"
-echo "Python lib path: ${PYTHON_LIB_PATH}"
+APPDIR=linux_cru.AppDir
+PYTHON=${PYTHON:-python3}
 
-# First check for the Python script
-echo "Checking for linux-cru.py..."
-if [ ! -f "linux-cru.py" ]; then
-    echo "Error: linux-cru.py not found!"
-    exit 1
+# Core libraries that must come from the host, not from us. Bundling
+# these is what makes an AppImage crash on a system whose glibc differs.
+EXCLUDE_RE='^(libc|libm|libdl|libpthread|librt|libresolv|libutil|libgcc_s|libstdc\+\+|ld-linux.*)\.so'
+
+log() { printf '\033[1m==>\033[0m %s\n' "$*"; }
+die() { printf '\033[31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+[ -f linux-cru.py ] || die "linux-cru.py not found; run this from the repo root"
+[ -d linux_cru ] || die "linux_cru/ package not found; run this from the repo root"
+command -v "$PYTHON" >/dev/null || die "$PYTHON not found"
+
+PYVER=$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+PYBIN=$("$PYTHON" -c 'import sys; print(sys.executable)')
+STDLIB=$("$PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')
+
+log "Python $PYVER ($PYBIN)"
+log "Standard library: $STDLIB"
+"$PYTHON" -c 'import tkinter' 2>/dev/null || die "this Python has no tkinter (install python3-tk / tk)"
+
+rm -rf "$APPDIR"
+mkdir -p "$APPDIR"/usr/{bin,lib} \
+         "$APPDIR"/usr/share/applications \
+         "$APPDIR"/usr/share/icons/hicolor/{16x16,32x32,48x48,64x64,128x128,256x256,512x512,scalable}/apps
+
+# ---------------------------------------------------------------- libraries
+
+copy_libs() {  # copy the shared libraries a binary needs
+    local target="$1" lib base
+    ldd "$target" 2>/dev/null | awk '/=> \//{print $3}' | while read -r lib; do
+        [ -f "$lib" ] || continue
+        base=$(basename "$lib")
+        if echo "$base" | grep -Eq "$EXCLUDE_RE"; then continue; fi
+        [ -e "$APPDIR/usr/lib/$base" ] && continue
+        cp -L "$lib" "$APPDIR/usr/lib/$base"
+    done
+}
+
+# ---------------------------------------------------------------- interpreter
+
+log "Copying the interpreter and standard library"
+cp -L "$PYBIN" "$APPDIR/usr/bin/python$PYVER"
+copy_libs "$APPDIR/usr/bin/python$PYVER"
+
+mkdir -p "$APPDIR/usr/lib/python$PYVER"
+# Only the standard library is needed. Third-party packages from the
+# build machine, build-time headers and the test suites are all skipped;
+# site-packages alone is usually hundreds of megabytes.
+tar -C "$STDLIB" \
+    --exclude='site-packages' --exclude='dist-packages' \
+    --exclude='config-*' --exclude='__pycache__' \
+    --exclude='test' --exclude='tests' --exclude='idlelib' \
+    --exclude='turtledemo' --exclude='ensurepip' --exclude='pydoc_data' \
+    --exclude='lib2to3' --exclude='*.pyo' --exclude='*.pyc' \
+    -cf - . | tar -C "$APPDIR/usr/lib/python$PYVER" -xf -
+
+# Every compiled extension module drags in its own libraries.
+if [ -d "$APPDIR/usr/lib/python$PYVER/lib-dynload" ]; then
+    find "$APPDIR/usr/lib/python$PYVER/lib-dynload" -name '*.so' | while read -r so; do
+        copy_libs "$so"
+    done
 fi
 
-# Create directory structure
-mkdir -p linux_cru.AppDir/usr/{bin,lib/python${PYTHON_VERSION},share/{applications,icons/hicolor/{16x16,32x32,48x48,64x64,128x128,256x256,512x512,scalable}/apps}}
+# ---------------------------------------------------------------- tcl/tk
 
-# Copy your script and the linux_cru package (into the bundled Python's lib
-# dir, which AppRun puts on PYTHONPATH)
-cp linux-cru.py linux_cru.AppDir/usr/bin/linux_cru
-chmod +x linux_cru.AppDir/usr/bin/linux_cru
-cp -r linux_cru linux_cru.AppDir/usr/lib/python${PYTHON_VERSION}/linux_cru
-rm -rf linux_cru.AppDir/usr/lib/python${PYTHON_VERSION}/linux_cru/__pycache__
+log "Locating the Tcl/Tk runtime"
+TCL_DIR=$("$PYTHON" - <<'PY'
+import tkinter, sys
+try:
+    r = tkinter.Tk(useTk=0)          # no display needed
+    print(r.tk.exprstring('$tcl_library'))
+except Exception:
+    sys.exit(1)
+PY
+) || TCL_DIR=""
 
-# Create the desktop entry
-cat > linux_cru.AppDir/usr/share/applications/linux_cru.desktop << 'EOF'
+if [ -z "$TCL_DIR" ]; then
+    for d in /usr/share/tcltk/tcl8.6 /usr/lib/tcl8.6 /usr/lib64/tcl8.6 /usr/share/tcl8.6; do
+        [ -f "$d/init.tcl" ] && { TCL_DIR="$d"; break; }
+    done
+fi
+[ -n "$TCL_DIR" ] && [ -f "$TCL_DIR/init.tcl" ] || die "could not find init.tcl (Tcl runtime)"
+
+# tk_library needs a display to query, so derive it from the Tcl path.
+TK_DIR=""
+for candidate in \
+    "$(dirname "$TCL_DIR")/tk${TCL_DIR##*tcl}" \
+    /usr/share/tcltk/tk8.6 /usr/lib/tk8.6 /usr/lib64/tk8.6 /usr/share/tk8.6; do
+    [ -f "$candidate/tk.tcl" ] && { TK_DIR="$candidate"; break; }
+done
+[ -n "$TK_DIR" ] || die "could not find tk.tcl (Tk runtime)"
+
+log "Tcl: $TCL_DIR"
+log "Tk:  $TK_DIR"
+cp -r "$TCL_DIR" "$APPDIR/usr/lib/$(basename "$TCL_DIR")"
+cp -r "$TK_DIR" "$APPDIR/usr/lib/$(basename "$TK_DIR")"
+TCL_NAME=$(basename "$TCL_DIR")
+TK_NAME=$(basename "$TK_DIR")
+
+# Tcl packages that live next to the main directory (itcl, thread, ...)
+for extra in "$(dirname "$TCL_DIR")"/tcl8 "$(dirname "$TCL_DIR")"/tcl8.6/tcl8; do
+    [ -d "$extra" ] && cp -r "$extra" "$APPDIR/usr/lib/" 2>/dev/null || true
+done
+
+# ---------------------------------------------------------------- application
+
+log "Copying the application"
+cp linux-cru.py "$APPDIR/usr/bin/linux_cru"
+chmod +x "$APPDIR/usr/bin/linux_cru"
+cp -r linux_cru "$APPDIR/usr/lib/python$PYVER/linux_cru"
+rm -rf "$APPDIR/usr/lib/python$PYVER/linux_cru/__pycache__"
+
+# ---------------------------------------------------------------- desktop entry
+
+cat > "$APPDIR/usr/share/applications/linux_cru.desktop" <<'EOF'
 [Desktop Entry]
 Name=Linux Custom Resolution Utility
 Exec=linux_cru
 Icon=linux_cru
 Type=Application
-Categories=Settings
-Comment=Custom Resolution Utility for Linux
+Categories=Settings;
+Comment=Create custom display resolutions and refresh rates
+Terminal=false
 EOF
+cp "$APPDIR/usr/share/applications/linux_cru.desktop" "$APPDIR/linux_cru.desktop"
 
-# Create desktop entry symlink
-cp linux_cru.AppDir/usr/share/applications/linux_cru.desktop linux_cru.AppDir/
+# ---------------------------------------------------------------- icon
 
-# Create SVG icon (same as original)
-cat > linux_cru.AppDir/usr/share/icons/hicolor/scalable/apps/linux_cru.svg << 'EOF'
+cat > "$APPDIR/usr/share/icons/hicolor/scalable/apps/linux_cru.svg" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
   <rect width="512" height="512" rx="50" fill="#2B3440"/>
@@ -63,106 +167,96 @@ cat > linux_cru.AppDir/usr/share/icons/hicolor/scalable/apps/linux_cru.svg << 'E
 </svg>
 EOF
 
-# Convert SVG to PNG for all required sizes
-for size in 16 32 48 64 128 256 512; do
-    convert -background none -size ${size}x${size} \
-        linux_cru.AppDir/usr/share/icons/hicolor/scalable/apps/linux_cru.svg \
-        linux_cru.AppDir/usr/share/icons/hicolor/${size}x${size}/apps/linux_cru.png
-done
+CONVERT=""
+command -v magick >/dev/null && CONVERT="magick"
+[ -z "$CONVERT" ] && command -v convert >/dev/null && CONVERT="convert"
+if [ -n "$CONVERT" ]; then
+    for size in 16 32 48 64 128 256 512; do
+        $CONVERT -background none -size ${size}x${size} \
+            "$APPDIR/usr/share/icons/hicolor/scalable/apps/linux_cru.svg" \
+            "$APPDIR/usr/share/icons/hicolor/${size}x${size}/apps/linux_cru.png" 2>/dev/null || true
+    done
+    cp "$APPDIR/usr/share/icons/hicolor/256x256/apps/linux_cru.png" \
+       "$APPDIR/linux_cru.png" 2>/dev/null || true
+fi
+# AppImages need an icon at the root; fall back to the SVG.
+[ -f "$APPDIR/linux_cru.png" ] || \
+    cp "$APPDIR/usr/share/icons/hicolor/scalable/apps/linux_cru.svg" "$APPDIR/linux_cru.svg"
 
-# Copy the main icon to root for AppImage
-cp linux_cru.AppDir/usr/share/icons/hicolor/256x256/apps/linux_cru.png linux_cru.AppDir/linux_cru.png
+# ---------------------------------------------------------------- AppRun
 
-# Create AppRun script with proper Python paths
-cat > linux_cru.AppDir/AppRun << EOF
+cat > "$APPDIR/AppRun" <<EOF
 #!/bin/bash
 HERE="\$(dirname "\$(readlink -f "\${0}")")"
+
+# Keep the caller's values. This application runs system tools (xrandr,
+# kscreen-doctor, systemctl, pkexec) and they must not inherit the
+# bundle's library paths, or they will load our copies of libraries
+# instead of their own.
+export LINUX_CRU_SAVED_MARKER=1
+[ -n "\${PYTHONHOME:-}" ] && export LINUX_CRU_SAVED_PYTHONHOME="\$PYTHONHOME"
+[ -n "\${PYTHONPATH:-}" ] && export LINUX_CRU_SAVED_PYTHONPATH="\$PYTHONPATH"
+[ -n "\${LD_LIBRARY_PATH:-}" ] && export LINUX_CRU_SAVED_LD_LIBRARY_PATH="\$LD_LIBRARY_PATH"
+[ -n "\${TCL_LIBRARY:-}" ] && export LINUX_CRU_SAVED_TCL_LIBRARY="\$TCL_LIBRARY"
+[ -n "\${TK_LIBRARY:-}" ] && export LINUX_CRU_SAVED_TK_LIBRARY="\$TK_LIBRARY"
+
+export APPDIR="\${APPDIR:-\$HERE}"
 export PATH="\${HERE}/usr/bin:\${PATH}"
-export PYTHONPATH="\${HERE}/usr/lib/python${PYTHON_VERSION}:\${HERE}/usr/lib/python${PYTHON_VERSION}/lib-dynload:\${PYTHONPATH}"
-export LD_LIBRARY_PATH="\${HERE}/usr/lib:\${LD_LIBRARY_PATH}"
-export TCL_LIBRARY="\${HERE}/usr/lib/tcl8.6"
-export TK_LIBRARY="\${HERE}/usr/lib/tk8.6"
-
-# Execute the main application
-exec "\${HERE}/usr/bin/python${PYTHON_VERSION}" "\${HERE}/usr/bin/linux_cru" "\$@"
+export PYTHONHOME="\${HERE}/usr"
+export PYTHONPATH="\${HERE}/usr/lib/python$PYVER:\${HERE}/usr/lib/python$PYVER/lib-dynload"
+export LD_LIBRARY_PATH="\${HERE}/usr/lib:\${LD_LIBRARY_PATH:-}"
+export TCL_LIBRARY="\${HERE}/usr/lib/$TCL_NAME"
+export TK_LIBRARY="\${HERE}/usr/lib/$TK_NAME"
+export TKPATH="\${HERE}/usr/lib/$TK_NAME"
+exec "\${HERE}/usr/bin/python$PYVER" "\${HERE}/usr/bin/linux_cru" "\$@"
 EOF
-chmod +x linux_cru.AppDir/AppRun
+chmod +x "$APPDIR/AppRun"
 
-# Copy Python interpreter
-cp /usr/bin/python${PYTHON_VERSION} linux_cru.AppDir/usr/bin/
+# ---------------------------------------------------------------- self-test
 
-# Copy essential Python standard library including tkinter
-echo "Copying Python standard library..."
-if [ -d "${PYTHON_LIB_PATH}" ]; then
-    cp -r "${PYTHON_LIB_PATH}"/* linux_cru.AppDir/usr/lib/python${PYTHON_VERSION}/
-else
-    echo "Warning: Python library path ${PYTHON_LIB_PATH} not found"
+log "Verifying the bundle"
+[ -f "$APPDIR/usr/lib/$TCL_NAME/init.tcl" ] || die "init.tcl missing from the bundle"
+[ -f "$APPDIR/usr/lib/$TK_NAME/tk.tcl" ] || die "tk.tcl missing from the bundle"
+
+# Run the bundled interpreter with the host's Python environment cleared,
+# so anything it still needs from outside shows up as a failure here
+# rather than on a user's machine.
+HERE="$(readlink -f "$APPDIR")"
+env -i \
+    HOME="$HOME" \
+    PATH="$HERE/usr/bin:/usr/bin:/bin" \
+    PYTHONHOME="$HERE/usr" \
+    PYTHONPATH="$HERE/usr/lib/python$PYVER:$HERE/usr/lib/python$PYVER/lib-dynload" \
+    LD_LIBRARY_PATH="$HERE/usr/lib" \
+    TCL_LIBRARY="$HERE/usr/lib/$TCL_NAME" \
+    TK_LIBRARY="$HERE/usr/lib/$TK_NAME" \
+    "$HERE/usr/bin/python$PYVER" - <<'PY' || die "the bundled interpreter is incomplete"
+import sys
+import tkinter, _tkinter                     # the hard one: pulls in libtk/libtcl
+import linux_cru
+from linux_cru import detect, edid, override, persist, privileged, timings, wayland
+print(f"    bundled python {sys.version.split()[0]}, "
+      f"tk {_tkinter.TK_VERSION}, linux_cru {linux_cru.__version__}: ok")
+PY
+
+log "Bundle size: $(du -sh "$APPDIR" | cut -f1)"
+
+# ---------------------------------------------------------------- package
+
+if [ "${SKIP_APPIMAGE:-0}" = "1" ]; then
+    log "SKIP_APPIMAGE=1, stopping after the AppDir"
+    exit 0
 fi
 
-# Copy tkinter-specific libraries
-echo "Copying tkinter libraries..."
-# Find and copy tkinter dynamic libraries
-find /usr/lib/x86_64-linux-gnu -name "*tk*" -o -name "*tcl*" | while read lib; do
-    if [ -f "$lib" ]; then
-        cp "$lib" linux_cru.AppDir/usr/lib/ 2>/dev/null || true
-    fi
-done
-
-# Copy additional required libraries
-libs_to_copy=(
-    "libtk8.6.so*"
-    "libtcl8.6.so*"
-    "libX11.so*"
-    "libXext.so*"
-    "libXft.so*"
-    "libfontconfig.so*"
-    "libfreetype.so*"
-    "libXrender.so*"
-    "libexpat.so*"
-    "libuuid.so*"
-    "libpng16.so*"
-    "libz.so*"
-    "libbz2.so*"
-    "liblzma.so*"
-)
-
-for lib_pattern in "${libs_to_copy[@]}"; do
-    find /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu -name "$lib_pattern" 2>/dev/null | while read lib; do
-        if [ -f "$lib" ]; then
-            cp "$lib" linux_cru.AppDir/usr/lib/ 2>/dev/null || true
-        fi
-    done
-done
-
-# Copy tcl/tk library directories
-if [ -d "/usr/lib/tcl8.6" ]; then
-    cp -r /usr/lib/tcl8.6 linux_cru.AppDir/usr/lib/
-fi
-if [ -d "/usr/lib/tk8.6" ]; then
-    cp -r /usr/lib/tk8.6 linux_cru.AppDir/usr/lib/
-fi
-
-# Copy any additional site-packages
-if [ -d "/usr/lib/python${PYTHON_VERSION}/dist-packages" ]; then
-    cp -r /usr/lib/python${PYTHON_VERSION}/dist-packages/* linux_cru.AppDir/usr/lib/python${PYTHON_VERSION}/ 2>/dev/null || true
-fi
-
-# Download appimagetool if not already present
-if [ ! -f "appimagetool-x86_64.AppImage" ]; then
-    echo "Downloading appimagetool..."
-    wget -c "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+if [ ! -f appimagetool-x86_64.AppImage ]; then
+    log "Downloading appimagetool"
+    wget -q -c "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
     chmod +x appimagetool-x86_64.AppImage
 fi
 
-# Build the AppImage
-echo "Building AppImage..."
-ARCH=x86_64 ./appimagetool-x86_64.AppImage linux_cru.AppDir Linux_CRU-x86_64.AppImage
+log "Building the AppImage"
+ARCH=x86_64 ./appimagetool-x86_64.AppImage "$APPDIR" Linux_CRU-x86_64.AppImage
 
-if [ ! -f "Linux_CRU-x86_64.AppImage" ]; then
-    echo "Error: AppImage creation failed!"
-    exit 1
-fi
-
+[ -f Linux_CRU-x86_64.AppImage ] || die "AppImage creation failed"
 chmod +x Linux_CRU-x86_64.AppImage
-echo "AppImage created successfully: Linux_CRU-x86_64.AppImage"
-echo "Size: $(du -h Linux_CRU-x86_64.AppImage | cut -f1)"
+log "Created Linux_CRU-x86_64.AppImage ($(du -h Linux_CRU-x86_64.AppImage | cut -f1))"

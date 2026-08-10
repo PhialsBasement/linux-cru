@@ -14,6 +14,8 @@ import os
 import shutil
 import subprocess
 
+from . import hostenv
+
 SUDO_ATTEMPTS = 3
 
 # pkexec says this when there is no authentication agent to talk to,
@@ -47,7 +49,7 @@ class Result:
 def _run(argv, stdin_text=None):
     try:
         p = subprocess.run(argv, capture_output=True, universal_newlines=True,
-                           input=stdin_text)
+                           input=stdin_text, env=hostenv.subprocess_env())
         return p.returncode, p.stdout, p.stderr
     except OSError as e:
         return 127, "", str(e)

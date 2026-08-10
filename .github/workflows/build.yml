@@ -4,8 +4,11 @@ on:
     branches: [ main ]
     paths:
       - 'linux-cru.py'
+      - 'linux_cru/**'
+      - 'tests/**'
       - 'build_appimage.sh'
       - '.github/workflows/build.yml'
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -13,23 +16,76 @@ permissions:
   packages: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y python3-tk xvfb x11-xserver-utils
+    - name: Run tests
+      run: |
+        for t in tests/test_*.py; do
+          echo "== $t"
+          xvfb-run -a python3 "$t"
+        done
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0
+
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y fuse libfuse2 python3-tk imagemagick tcl8.6 tk8.6 tcl8.6-dev tk8.6-dev python3-dev
+        sudo apt-get install -y \
+          fuse libfuse2 python3-tk tk8.6 tcl8.6 imagemagick \
+          xvfb x11-xserver-utils file
+
     - name: Build AppImage
       run: |
         chmod +x build_appimage.sh
-        # Fix desktop entry path
-        sed -i 's|usr/share/applications/linux_cru.desktop|linux_cru.desktop|g' build_appimage.sh
         ./build_appimage.sh
+
+    - name: Verify the AppImage runs
+      run: |
+        # The build already checks that the bundled interpreter can
+        # import tkinter. This goes further: extract the AppImage and
+        # start the real application against a virtual display, so a
+        # missing Tcl script directory or library shows up here rather
+        # than on a user's machine.
+        ./Linux_CRU-x86_64.AppImage --appimage-extract > /dev/null
+        cat > /tmp/smoke.py <<'EOF'
+        import sys, tkinter
+        sys.argv = ["linux_cru"]
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "app", "squashfs-root/usr/bin/linux_cru")
+        app = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(app)
+        root = tkinter.Tk()
+        gui = app.LinuxCRU(root)          # builds every widget
+        assert gui.preview_text.get("1.0", "end").strip()
+        root.destroy()
+        print("AppImage smoke test: the interface builds and renders")
+        EOF
+        cp /tmp/smoke.py squashfs-root/usr/bin/smoke.py
+        xvfb-run -a env \
+          PYTHONHOME="$PWD/squashfs-root/usr" \
+          PYTHONPATH="$PWD/squashfs-root/usr/lib/python3.12:$PWD/squashfs-root/usr/lib/python3.12/lib-dynload:$PWD/squashfs-root/usr/bin" \
+          LD_LIBRARY_PATH="$PWD/squashfs-root/usr/lib" \
+          TCL_LIBRARY="$(echo $PWD/squashfs-root/usr/lib/tcl8.6)" \
+          TK_LIBRARY="$(echo $PWD/squashfs-root/usr/lib/tk8.6)" \
+          "$PWD/squashfs-root/usr/bin/python3.12" squashfs-root/usr/bin/smoke.py \
+          || (echo "the packaged application failed to start" && exit 1)
+        rm -rf squashfs-root
+
     - name: Generate new tag
+      if: github.event_name != 'pull_request'
       id: tag
       run: |
         latest_tag=$(git describe --tags `git rev-list --tags --max-count=1` 2>/dev/null || echo "v0.0.0")
@@ -39,7 +95,9 @@ jobs:
         new_patch=$((patch + 1))
         new_tag="v$major.$minor.$new_patch"
         echo "new_tag=$new_tag" >> $GITHUB_OUTPUT
+
     - name: Create Release
+      if: github.event_name != 'pull_request'
       uses: softprops/action-gh-release@v1
       with:
         tag_name: ${{ steps.tag.outputs.new_tag }}
@@ -49,10 +107,11 @@ jobs:
         files: Linux_CRU-x86_64.AppImage
         body: |
           Automated release for commit ${{ github.sha }}
-          
-          Changes in this release:
-          - Updated AppImage build
-          
-          Download the AppImage, make it executable with `chmod +x Linux_CRU-x86_64.AppImage`, and run it!
+
+          The AppImage bundles Python, tkinter and the whole Tcl/Tk
+          runtime, so it does not need Python installed on your system.
+
+          Download it, make it executable with
+          `chmod +x Linux_CRU-x86_64.AppImage`, and run it.
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -11,13 +11,15 @@ import json
 import re
 import subprocess
 
+from . import hostenv
+
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _run(cmd):
     try:
         return subprocess.run(cmd, capture_output=True, universal_newlines=True,
-                              timeout=10)
+                              timeout=10, env=hostenv.subprocess_env())
     except (OSError, subprocess.SubprocessError) as e:
         class _Failed:
             returncode = 1

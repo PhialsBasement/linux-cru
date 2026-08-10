@@ -10,7 +10,10 @@ import os
 import re
 import shutil
 import subprocess
+
 from dataclasses import dataclass, field
+
+from . import hostenv
 
 
 def _read(path):
@@ -24,7 +27,8 @@ def _read(path):
 def _run(cmd):
     try:
         return subprocess.check_output(
-            cmd, universal_newlines=True, stderr=subprocess.DEVNULL, timeout=5
+            cmd, universal_newlines=True, stderr=subprocess.DEVNULL, timeout=5,
+            env=hostenv.subprocess_env(),
         ).strip()
     except (OSError, subprocess.SubprocessError):
         return None
