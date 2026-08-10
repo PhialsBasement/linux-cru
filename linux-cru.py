@@ -17,7 +17,7 @@ from tkinter import ttk, messagebox
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from linux_cru import detect, timings
+from linux_cru import detect, timings, wayland
 
 TEST_REVERT_SECONDS = 15
 
@@ -241,10 +241,14 @@ class LinuxCRU:
 
         self.preview_text.delete(1.0, tk.END)
         self.preview_text.insert(1.0, header + body)
-        self.status_var.set("Configuration generated. Use Test Mode to try it, then "
-                            "Apply Configuration to save it."
-                            if self.env.session_type == "x11"
-                            else "Configuration generated. Run the commands shown in the preview.")
+        if self.env.session_type == "x11":
+            status = ("Configuration generated. Use Test Mode to try it, then "
+                      "Apply Configuration to save it.")
+        elif self._wayland_testable():
+            status = "Configuration generated. Use Test Mode to try it."
+        else:
+            status = "Configuration generated. Run the commands shown in the preview."
+        self.status_var.set(status)
 
     def build_x11_preview(self, out, name, ml):
         parts = ["# Test commands (the Test Mode button runs these):\n",
@@ -384,7 +388,7 @@ class LinuxCRU:
                                     command=self.apply_configuration)
         self.apply_btn.grid(row=0, column=3, padx=5)
 
-        if self.env.session_type != "x11":
+        if not (self.env.session_type == "x11" or self._wayland_testable()):
             self.test_btn.state(["disabled"])
 
         self.status_var = tk.StringVar()
@@ -419,19 +423,35 @@ class LinuxCRU:
         self._xrandr('--delmode', out, name)
         self._xrandr('--rmmode', name)
 
+    def _wayland_testable(self):
+        env = self.env
+        return (env.session_type == "wayland"
+                and not env.has_nvidia_proprietary
+                and (env.kde_custom_modes_available
+                     or env.compositor in ("sway", "hyprland")))
+
     def test_mode(self):
-        if self.env.session_type != "x11":
-            messagebox.showinfo("X11 only",
-                                "Live testing via xrandr only works on X11.\n"
-                                "Use the compositor commands from the preview instead.")
-            return
         try:
             name, ml = self.current_modeline()
         except ValueError as e:
             messagebox.showerror("Error", f"Invalid input: {e}")
             return
-        name += "_test"
         out = self.display_var.get()
+
+        if self.env.session_type == "x11":
+            self._test_mode_x11(out, name + "_test", ml)
+        elif self._wayland_testable():
+            if self.env.compositor == "kwin":
+                self._test_mode_kwin(out)
+            else:
+                self._test_mode_wlroots(out, ml)
+        else:
+            messagebox.showinfo(
+                "Not supported here",
+                "Live testing is not possible in this environment.\n"
+                "See the preview for what to do instead.")
+
+    def _test_mode_x11(self, out, name, ml):
         previous = self._current_mode(out)
 
         res = self._xrandr('--newmode', name, *ml.xrandr_args())
@@ -461,9 +481,77 @@ class LinuxCRU:
                 "check dmesg.")
             return
 
-        self._show_revert_dialog(out, name, previous)
+        def revert():
+            if previous:
+                self._xrandr('--output', out, '--mode', previous[0],
+                             '--rate', previous[1])
+            else:
+                self._xrandr('--output', out, '--auto')
+            self._cleanup_test_mode(out, name)
 
-    def _show_revert_dialog(self, out, name, previous):
+        self._show_revert_dialog(
+            out, revert,
+            keep_status="Mode kept for this session. Use Apply Configuration "
+                        "to keep it after a restart.")
+
+    def _test_mode_kwin(self, out):
+        w, h, r = self.read_inputs()
+        state = wayland.kwin_state(out)
+        if not state:
+            messagebox.showerror("Error", "Could not read the display configuration.")
+            return
+        previous_id, _ = state
+
+        reduced = self.standard_var.get() != "cvt"
+        new_id, err = wayland.kwin_add_custom_mode(out, w, h, r, reduced)
+        if not new_id:
+            messagebox.showerror("Error", f"Could not add the mode:\n{err}")
+            return
+
+        ok, msg = wayland.kwin_set_mode(out, new_id)
+        if not ok:
+            wayland.kwin_remove_custom_mode(out, w, h)
+            messagebox.showerror("Error", f"Could not switch to the mode:\n{msg}")
+            return
+
+        def revert():
+            wayland.kwin_set_mode(out, previous_id)
+            wayland.kwin_remove_custom_mode(out, w, h)
+
+        self._show_revert_dialog(
+            out, revert,
+            keep_status="Mode kept. KDE saves display settings automatically.")
+
+    def _test_mode_wlroots(self, out, ml):
+        w, h, r = self.read_inputs()
+        previous = detect.current_mode(self.env, out)
+
+        if self.env.compositor == "sway":
+            apply_modeline, set_mode = wayland.sway_apply_modeline, wayland.sway_set_mode
+        else:
+            apply_modeline, set_mode = (wayland.hyprland_apply_modeline,
+                                        wayland.hyprland_set_mode)
+
+        ok, msg = apply_modeline(out, ml.timing_string())
+        if not ok:
+            messagebox.showerror(
+                "Error",
+                f"The compositor rejected the mode:\n{msg}\n\n"
+                "The driver may not accept these timings. Check the compositor "
+                "log and dmesg.")
+            return
+
+        def revert():
+            if previous:
+                pw, ph, pr = previous
+                set_mode(out, pw, ph, pr)
+
+        self._show_revert_dialog(
+            out, revert,
+            keep_status="Mode applied for this session. To keep it permanently, "
+                        "add the line from the preview to your compositor config.")
+
+    def _show_revert_dialog(self, out, on_revert, keep_status):
         dialog = tk.Toplevel(self.root)
         dialog.title("Testing mode")
         dialog.geometry("420x140")
@@ -482,11 +570,7 @@ class LinuxCRU:
             if state["done"]:
                 return
             state["done"] = True
-            if previous:
-                self._xrandr('--output', out, '--mode', previous[0], '--rate', previous[1])
-            else:
-                self._xrandr('--output', out, '--auto')
-            self._cleanup_test_mode(out, name)
+            on_revert()
             dialog.destroy()
             self.status_var.set("Reverted to previous mode.")
 
@@ -495,8 +579,7 @@ class LinuxCRU:
                 return
             state["done"] = True
             dialog.destroy()
-            self.status_var.set("Mode kept for this session. Use Apply Configuration "
-                                "to keep it after a restart.")
+            self.status_var.set(keep_status)
 
         def tick():
             if state["done"]:
@@ -524,10 +607,24 @@ class LinuxCRU:
 
     def apply_configuration(self):
         if self.env.session_type != "x11":
-            messagebox.showinfo(
-                "Wayland",
-                "On Wayland, apply the mode with the commands shown in the preview.\n"
-                "Applying directly from this tool is not supported yet.")
+            if self._wayland_testable():
+                if self.env.compositor == "kwin":
+                    messagebox.showinfo(
+                        "Wayland",
+                        "Use Test Mode to apply the mode. If you keep it,\n"
+                        "KDE saves it automatically.")
+                else:
+                    messagebox.showinfo(
+                        "Wayland",
+                        "Use Test Mode to apply the mode now. To keep it\n"
+                        "permanently, add the line from the preview to your\n"
+                        "compositor config file.")
+            else:
+                messagebox.showinfo(
+                    "Wayland",
+                    "On Wayland, apply the mode with the commands shown in\n"
+                    "the preview. Applying directly from this tool is not\n"
+                    "supported in this environment yet.")
             return
         try:
             name, ml = self.current_modeline()
