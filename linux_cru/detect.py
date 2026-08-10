@@ -215,6 +215,106 @@ def _bootloader():
     return "unknown"
 
 
+# -- current mode of an output ----------------------------------------------
+
+def current_mode(env: Environment, output: str):
+    """(width, height, refresh) active on `output`, or None if unknown.
+
+    Uses xrandr on X11 and the compositor's own CLI on Wayland.
+    """
+    try:
+        if env.session_type == "x11":
+            return _current_mode_xrandr(output)
+        if env.session_type == "wayland":
+            if env.compositor == "kwin":
+                return _current_mode_kscreen(output)
+            if env.compositor == "sway":
+                return _current_mode_sway(output)
+            if env.compositor == "hyprland":
+                return _current_mode_hyprland(output)
+            if env.is_wlroots_family:
+                return _current_mode_wlr_randr(output)
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def _current_mode_xrandr(output):
+    out = _run(["xrandr", "-q"])
+    if not out:
+        return None
+    in_block = False
+    for line in out.splitlines():
+        if not line.startswith((" ", "\t")):
+            tokens = line.split()
+            in_block = bool(tokens) and tokens[0] == output
+            continue
+        if in_block and "*" in line:
+            tokens = line.split()
+            w, _, h = tokens[0].partition("x")
+            for tok in tokens[1:]:
+                if "*" in tok:
+                    return int(w), int(h), float(tok.replace("*", "").replace("+", ""))
+    return None
+
+
+def _current_mode_kscreen(output):
+    import json
+    out = _run(["kscreen-doctor", "-j"])
+    if not out:
+        return None
+    data = json.loads(out)
+    for o in data.get("outputs", []):
+        if o.get("name") != output:
+            continue
+        current = str(o.get("currentModeId"))
+        for m in o.get("modes", []):
+            if str(m.get("id")) == current:
+                size = m.get("size", {})
+                return (int(size.get("width")), int(size.get("height")),
+                        float(m.get("refreshRate")))
+    return None
+
+
+def _current_mode_sway(output):
+    import json
+    out = _run(["swaymsg", "-t", "get_outputs"])
+    if not out:
+        return None
+    for o in json.loads(out):
+        if o.get("name") == output and o.get("current_mode"):
+            m = o["current_mode"]
+            return int(m["width"]), int(m["height"]), m["refresh"] / 1000.0
+    return None
+
+
+def _current_mode_hyprland(output):
+    import json
+    out = _run(["hyprctl", "monitors", "-j"])
+    if not out:
+        return None
+    for o in json.loads(out):
+        if o.get("name") == output:
+            return int(o["width"]), int(o["height"]), float(o["refreshRate"])
+    return None
+
+
+def _current_mode_wlr_randr(output):
+    out = _run(["wlr-randr"])
+    if not out:
+        return None
+    in_block = False
+    for line in out.splitlines():
+        if not line.startswith((" ", "\t")):
+            in_block = line.split()[0] == output if line.split() else False
+            continue
+        if in_block and "current" in line:
+            m = re.search(r"(\d+)x(\d+)\s+px,\s+([\d.]+)\s+Hz", line)
+            if m:
+                return int(m.group(1)), int(m.group(2)), float(m.group(3))
+    return None
+
+
 # -- human-readable capability summary --------------------------------------
 
 def describe_paths(env: Environment) -> str:
@@ -223,45 +323,44 @@ def describe_paths(env: Environment) -> str:
 
     if env.session_type == "x11":
         if env.has_nvidia_proprietary:
-            return (f"X11 + NVIDIA ({_fmt_ver(env.nvidia_version)}): custom modelines need "
-                    "xorg.conf ModeValidation (use Apply, then restart X). After that, "
-                    "Test Mode works live via xrandr.")
-        return (f"X11 + {drv}: Test Mode applies live via xrandr with auto-revert; "
-                "Apply persists via /etc/X11/xorg.conf.d.")
+            return ("Custom modes on the NVIDIA driver need ModeValidation in xorg.conf. "
+                    "Click Apply Configuration, then restart X. After that Test Mode works.")
+        return ("Test Mode applies the mode immediately and reverts automatically. "
+                "Apply Configuration saves it to /etc/X11/xorg.conf.d.")
 
     if env.session_type == "wayland":
         if env.has_nvidia_proprietary:
             if env.nvidia_edid_override_ok:
-                return ("Wayland + NVIDIA: compositor custom modes are rejected by the "
-                        "driver — the only working path is a kernel EDID override "
-                        "(supported on your setup: driver ≥ 535, kernel ≥ 6.2, modeset on). "
-                        "Note: EDID override currently disables VRR/G-SYNC (NVIDIA bug).")
-            return ("Wayland + NVIDIA: EDID override requires driver ≥ 535, kernel ≥ 6.2 "
-                    f"and nvidia-drm.modeset=1 — your setup: driver {_fmt_ver(env.nvidia_version)}, "
-                    f"kernel {env.kernel_release}, modeset={'on' if env.nvidia_drm_modeset else 'off'}.")
+                return ("The NVIDIA driver does not accept custom modes from Wayland "
+                        "compositors. An EDID override is the only way, and your setup "
+                        "supports it. Warning: EDID overrides currently break VRR on NVIDIA.")
+            return ("The NVIDIA driver does not accept custom modes from Wayland "
+                    "compositors. An EDID override needs driver 535 or newer, kernel 6.2 "
+                    f"or newer, and nvidia-drm.modeset=1. Your setup: driver "
+                    f"{_fmt_ver(env.nvidia_version)}, kernel {env.kernel_release}, "
+                    f"modeset {'on' if env.nvidia_drm_modeset else 'off'}.")
         if env.compositor in ("sway", "hyprland"):
-            return (f"Wayland + {drv} on {env.compositor}: full custom modelines supported "
-                    "natively — see the generated commands in the preview.")
+            return (f"{env.compositor} supports custom modelines. "
+                    "See the commands in the preview.")
         if env.compositor == "kwin":
             if env.kde_custom_modes_available:
-                return (f"Wayland + {drv} on KDE Plasma {_fmt_ver(env.compositor_version)}: "
-                        "custom modes via kscreen-doctor addCustomMode — see preview.")
-            return (f"Wayland + {drv} on KDE Plasma {_fmt_ver(env.compositor_version)}: "
-                    "custom modes need Plasma ≥ 6.6 (or a kernel EDID override).")
+                return ("KDE Plasma supports custom modes through kscreen-doctor. "
+                        "See the commands in the preview.")
+            return (f"KDE Plasma {_fmt_ver(env.compositor_version)} cannot add custom "
+                    "modes. That needs Plasma 6.6 or newer, or an EDID override.")
         if env.compositor == "mutter":
-            return (f"Wayland + {drv} on GNOME: GNOME offers no compositor-level custom "
-                    "modes — the kernel EDID override is the only path.")
+            return ("GNOME has no way to add custom modes. "
+                    "An EDID override is the only option.")
         if env.compositor == "cosmic":
-            return (f"Wayland + {drv} on COSMIC: custom modes are currently broken in "
-                    "cosmic-comp — use a kernel EDID override.")
+            return ("Custom modes are currently broken in COSMIC. "
+                    "Use an EDID override instead.")
         if env.is_wlroots_family:
-            return (f"Wayland + {drv} on {env.compositor}: wlr-randr --custom-mode works "
-                    "(CVT timings computed by the compositor); full modelines need an "
-                    "EDID override.")
-        return (f"Wayland + {drv} on {env.compositor}: unknown compositor — the kernel "
-                "EDID override is the universal path.")
+            return (f"{env.compositor} accepts simple custom modes through wlr-randr. "
+                    "Exact timings need an EDID override.")
+        return (f"Unknown compositor ({env.compositor}). "
+                "An EDID override works everywhere.")
 
-    return "Could not determine session type (no DISPLAY or WAYLAND_DISPLAY)."
+    return "Could not detect the session type."
 
 
 def _fmt_ver(v):

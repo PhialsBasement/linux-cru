@@ -60,6 +60,7 @@ class LinuxCRU:
         self.create_preview_section()
         self.create_action_section()
 
+        self.load_current_settings()
         self.generate_preview()
         self.bind_validators()
 
@@ -71,12 +72,13 @@ class LinuxCRU:
         frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         frame.grid_columnconfigure(0, weight=1)
 
-        session = env.session_type.upper() if env.session_type != "unknown" else "unknown session"
+        session = env.session_type.upper() if env.session_type != "unknown" else "unknown"
         comp = env.compositor
         if env.compositor_version:
             comp += " " + ".".join(str(x) for x in env.compositor_version[:2])
         drivers = ", ".join(env.drivers) or "unknown"
-        summary = f"{session} · {comp} · GPU: {drivers} · kernel {env.kernel_release}"
+        summary = (f"Session: {session}   Compositor: {comp}   "
+                   f"GPU: {drivers}   Kernel: {env.kernel_release}")
         ttk.Label(frame, text=summary).grid(row=0, column=0, sticky="w", padx=5)
 
         paths = detect.describe_paths(env)
@@ -96,10 +98,11 @@ class LinuxCRU:
         combo = ttk.Combobox(frame, textvariable=self.display_var,
                              values=self.displays, state="readonly")
         combo.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
-        combo.bind('<<ComboboxSelected>>', lambda e: self.generate_preview())
+        combo.bind('<<ComboboxSelected>>', lambda e: self.load_current_settings())
 
         ttk.Button(frame, text="Get Current Settings",
-                   command=self.get_current_resolution).grid(row=0, column=1, padx=5, pady=5)
+                   command=lambda: self.load_current_settings(quiet=False)
+                   ).grid(row=0, column=1, padx=5, pady=5)
 
     def get_displays(self):
         """Output names: xrandr names on X11, DRM connector names on Wayland."""
@@ -119,24 +122,21 @@ class LinuxCRU:
         others = [c.name for c in self.env.connectors if c.status != "connected"]
         return connected + others if (connected or others) else ["DP-1"]
 
-    def get_current_resolution(self):
-        if self.env.session_type != "x11":
-            messagebox.showinfo(
-                "Not available",
-                "Reading the current mode via xrandr only works on X11.\n"
-                "On Wayland, check your compositor's display settings.")
-            return
-        try:
-            current = self._current_mode(self.display_var.get())
-            if not current:
-                raise RuntimeError("no active mode found for this output")
-            mode, rate = current
-            w, _, h = mode.partition('x')
-            self.width_var.set(w)
-            self.height_var.set(h)
-            self.refresh_var.set(rate)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to get current resolution: {e}")
+    def load_current_settings(self, quiet=True):
+        """Fill the inputs with the selected display's active mode."""
+        out = self.display_var.get()
+        mode = detect.current_mode(self.env, out)
+        if mode:
+            w, h, r = mode
+            self.width_var.set(str(w))
+            self.height_var.set(str(h))
+            self.refresh_var.set(f"{round(r, 3):g}")
+            self.status_var.set(f"Loaded current mode of {out}: {w}x{h} at {round(r, 3):g} Hz")
+        else:
+            self.generate_preview()
+            if not quiet:
+                messagebox.showerror(
+                    "Error", f"Could not read the current mode of {out}.")
 
     # -- resolution inputs ------------------------------------------------------
 
@@ -178,9 +178,9 @@ class LinuxCRU:
 
         self.standard_var = tk.StringVar(value="cvt-rb2")
         options = [
-            ("CVT-RBv2 (recommended: lowest pixel clock, any refresh)", "cvt-rb2"),
-            ("CVT-RB (reduced blanking v1, matches `cvt -r`)", "cvt-rb"),
-            ("CVT (full blanking, CRT-era)", "cvt"),
+            ("CVT-RBv2 (recommended for modern displays)", "cvt-rb2"),
+            ("CVT-RB (reduced blanking v1)", "cvt-rb"),
+            ("CVT (full blanking)", "cvt"),
         ]
         for i, (label, value) in enumerate(options):
             ttk.Radiobutton(frame, text=label, variable=self.standard_var, value=value,
@@ -191,8 +191,7 @@ class LinuxCRU:
             self.relax_validation = tk.BooleanVar(value=False)
             ttk.Checkbutton(
                 frame,
-                text="Relax NVIDIA mode validation (overclocking: skip EDID "
-                     "pixel-clock/sync-range checks)",
+                text="Skip NVIDIA EDID and pixel clock checks (needed for overclocking)",
                 variable=self.relax_validation,
                 command=self.generate_preview).grid(row=len(options), column=0,
                                                     sticky="w", padx=5, pady=(6, 0))
@@ -228,8 +227,8 @@ class LinuxCRU:
             return  # incomplete input while typing
         out = self.display_var.get()
 
-        header = (f"# {name} — {ml.clock_mhz:.3f} MHz pixel clock, "
-                  f"actual {ml.actual_refresh:.3f} Hz "
+        header = (f"# {name}: {ml.clock_mhz:.3f} MHz pixel clock, "
+                  f"{ml.actual_refresh:.3f} Hz actual "
                   f"({self.standard_var.get().upper()})\n"
                   f"# {ml.xorg_modeline(name)}\n\n")
 
@@ -238,20 +237,21 @@ class LinuxCRU:
         elif self.env.session_type == "wayland":
             body = self.build_wayland_preview(out, name, ml)
         else:
-            body = "Could not determine session type; showing raw modeline only.\n"
+            body = "Could not detect the session type. Showing the modeline only.\n"
 
         self.preview_text.delete(1.0, tk.END)
         self.preview_text.insert(1.0, header + body)
-        self.status_var.set("Preview generated. Use Test Mode to try it live, "
-                            "Apply to persist." if self.env.session_type == "x11"
-                            else "Preview generated — see the commands above for your compositor.")
+        self.status_var.set("Configuration generated. Use Test Mode to try it, then "
+                            "Apply Configuration to save it."
+                            if self.env.session_type == "x11"
+                            else "Configuration generated. Run the commands shown in the preview.")
 
     def build_x11_preview(self, out, name, ml):
-        parts = ["## Live test (what the Test Mode button runs):\n",
+        parts = ["# Test commands (the Test Mode button runs these):\n",
                  f"xrandr --newmode \"{name}\" {ml.timing_string()}\n",
                  f"xrandr --addmode {out} \"{name}\"\n",
                  f"xrandr --output {out} --mode \"{name}\"\n\n",
-                 "## Persistent config (what Apply writes to "
+                 "# Configuration file (Apply Configuration writes this to "
                  "/etc/X11/xorg.conf.d/10-linux-cru.conf):\n\n",
                  self.build_xorg_config(out, name, ml)]
         return "".join(parts)
@@ -284,58 +284,77 @@ class LinuxCRU:
 
         if env.has_nvidia_proprietary:
             return self._edid_override_notes(out, name, ml,
-                reason="The NVIDIA driver rejects all compositor-injected custom modes "
-                       "on Wayland — the kernel EDID override is the only working path.")
+                reason="The NVIDIA driver does not accept custom modes from Wayland "
+                       "compositors.")
 
         if env.compositor == "sway":
-            return ("## Sway — run now:\n"
+            return ("# Run now:\n"
                     f"swaymsg 'output {out} modeline {ml.timing_string()}'\n\n"
-                    "## Persist — add to ~/.config/sway/config:\n"
+                    "# To make it permanent, add to ~/.config/sway/config:\n"
                     f"output {out} modeline {ml.timing_string()}\n")
 
         if env.compositor == "hyprland":
-            return ("## Hyprland — run now:\n"
+            return ("# Run now:\n"
                     f"hyprctl keyword monitor \"{out}, modeline {ml.timing_string()}, 0x0, 1\"\n\n"
-                    "## Persist — add to ~/.config/hypr/hyprland.conf:\n"
+                    "# To make it permanent, add to ~/.config/hypr/hyprland.conf:\n"
                     f"monitor = {out}, modeline {ml.timing_string()}, 0x0, 1\n")
 
         if env.compositor == "kwin":
             if env.kde_custom_modes_available:
                 mhz = int(round(r * 1000))
-                blanking = "full" if self.standard_var.get() == "cvt" else "reduced"
-                return ("## KDE Plasma ≥ 6.6 — two steps (not atomic):\n"
-                        f"kscreen-doctor output.{out}.addCustomMode.{w}.{h}.{mhz}.{blanking}\n"
-                        f"kscreen-doctor output.{out}.mode.{w}x{h}@{r:g}\n\n"
-                        "# Note: KWin computes CVT timings itself (libxcvt) — the modeline\n"
-                        "# above is informative; exact custom timings need an EDID override.\n")
+                if self.standard_var.get() == "cvt":
+                    blanking, kwin_std = "full", "cvt"
+                else:
+                    blanking, kwin_std = "reduced", "cvt-rb"
+                kwin_ml = timings.calc(w, h, r, kwin_std)
+                lines = [
+                    "# KWin takes only resolution and refresh rate, then computes the\n"
+                    "# timings itself. Run both commands (adding and switching are\n"
+                    "# separate steps):\n",
+                    f"kscreen-doctor output.{out}.addCustomMode.{w}.{h}.{mhz}.{blanking}\n",
+                    f"kscreen-doctor output.{out}.mode.{w}x{h}@{r:g}\n\n",
+                    f"# KWin will generate these timings ({kwin_std.upper()}):\n",
+                    f"# {kwin_ml.xorg_modeline(name)}\n",
+                ]
+                if self.standard_var.get() == "cvt-rb2":
+                    lines.append(
+                        "# KWin cannot generate CVT-RBv2 timings. To use the RBv2\n"
+                        "# timings shown at the top, you need an EDID override.\n")
+                return "".join(lines)
             return self._edid_override_notes(out, name, ml,
-                reason=f"KDE Plasma {'.'.join(map(str, env.compositor_version[:2])) or '?'} "
-                       "predates custom-mode support (needs ≥ 6.6).")
+                reason=f"KDE Plasma "
+                       f"{'.'.join(map(str, env.compositor_version[:2])) or '?'} "
+                       "cannot add custom modes. That needs Plasma 6.6 or newer.")
 
         if env.is_wlroots_family:
-            return (f"## {env.compositor} (wlroots) — run now:\n"
+            return ("# Run now:\n"
                     f"wlr-randr --output {out} --custom-mode {w}x{h}@{r:g}Hz\n\n"
-                    "# wlr-randr asks the compositor for CVT (full-blanking) timings.\n"
+                    "# The compositor computes CVT full-blanking timings for this.\n"
                     "# For exact custom timings, use an EDID override.\n")
 
         return self._edid_override_notes(out, name, ml,
-            reason=f"{env.compositor} offers no compositor-level custom modes.")
+            reason=f"{env.compositor} cannot add custom modes.")
 
     def _edid_override_notes(self, out, name, ml, reason):
         conn = self._drm_connector_for(out)
+        short = self._strip_card(conn)
         tool = self.env.initramfs_tool or "your initramfs tool"
-        return (f"## EDID override required — {reason}\n\n"
-                "# The universal Wayland path (GUI support coming to this tool):\n"
-                f"#  1. Dump the current EDID:  cat /sys/class/drm/{conn}/edid > mon.bin\n"
-                f"#  2. Add this timing as a DTD/DisplayID block (wxEDID, or Windows CRU export):\n"
-                f"#       {ml.xorg_modeline(name)}\n"
-                "#  3. Install: sudo install -Dm644 custom.bin /usr/lib/firmware/edid/custom.bin\n"
-                f"#  4. Kernel cmdline: drm.edid_firmware={self._strip_card(conn)}:edid/custom.bin\n"
-                f"#  5. Embed in initramfs ({tool}), then reboot.\n"
-                "# Runtime test first (root):\n"
-                f"#   cat custom.bin > /sys/kernel/debug/dri/<N>/{self._strip_card(conn)}/edid_override\n"
-                f"#   echo 1 > /sys/kernel/debug/dri/<N>/{self._strip_card(conn)}/trigger_hotplug\n"
-                "# See docs/RESEARCH.md in the Linux CRU repo for the full recipe.\n")
+        return (f"# {reason}\n"
+                "# Adding this mode requires an EDID override. Steps:\n"
+                "#   1. Dump the current EDID:\n"
+                f"#        cat /sys/class/drm/{conn}/edid > mon.bin\n"
+                "#   2. Add this timing to it as a detailed timing block\n"
+                "#      (wxEDID, or export from Windows CRU):\n"
+                f"#        {ml.xorg_modeline(name)}\n"
+                "#   3. Install the file:\n"
+                "#        sudo install -Dm644 custom.bin /usr/lib/firmware/edid/custom.bin\n"
+                "#   4. Add to the kernel command line:\n"
+                f"#        drm.edid_firmware={short}:edid/custom.bin\n"
+                f"#   5. Add the file to the initramfs ({tool}) and reboot.\n"
+                "# To test without rebooting (as root):\n"
+                f"#   cat custom.bin > /sys/kernel/debug/dri/<N>/{short}/edid_override\n"
+                f"#   echo 1 > /sys/kernel/debug/dri/<N>/{short}/trigger_hotplug\n"
+                "# Full details: docs/RESEARCH.md in the linux-cru repo.\n")
 
     def _drm_connector_for(self, out):
         for c in self.env.connectors:
@@ -437,8 +456,9 @@ class LinuxCRU:
             messagebox.showerror(
                 "Error",
                 f"Could not switch to the mode:\n{res.stderr}\n\n"
-                "'Configure crtc failed' usually means the pixel clock exceeds the "
-                "link/EDID limit — try CVT-RBv2 or a lower refresh rate. Check dmesg.")
+                "'Configure crtc failed' usually means the pixel clock is over the "
+                "link or EDID limit. Try CVT-RBv2 or a lower refresh rate, and "
+                "check dmesg.")
             return
 
         self._show_revert_dialog(out, name, previous)
@@ -475,16 +495,16 @@ class LinuxCRU:
                 return
             state["done"] = True
             dialog.destroy()
-            self.status_var.set(f"Mode kept for this session. Apply Configuration to "
-                                f"persist it across restarts.")
+            self.status_var.set("Mode kept for this session. Use Apply Configuration "
+                                "to keep it after a restart.")
 
         def tick():
             if state["done"]:
                 return
             n = remaining.get()
-            label.config(text=f"Custom mode is active on {out}.\n\n"
-                              f"Reverting in {n} second(s) unless you keep it.\n"
-                              f"(Press Enter to keep)")
+            label.config(text=f"Testing new mode on {out}.\n\n"
+                              f"Reverting in {n} seconds.\n"
+                              f"Press Enter or click Keep to keep it.")
             if n <= 0:
                 revert()
                 return
@@ -506,9 +526,8 @@ class LinuxCRU:
         if self.env.session_type != "x11":
             messagebox.showinfo(
                 "Wayland",
-                "Persisting on Wayland uses compositor config or a kernel EDID "
-                "override — see the commands in the preview. A built-in EDID "
-                "backend is the next milestone for this tool.")
+                "On Wayland, apply the mode with the commands shown in the preview.\n"
+                "Applying directly from this tool is not supported yet.")
             return
         try:
             name, ml = self.current_modeline()
@@ -543,13 +562,13 @@ class LinuxCRU:
         if success:
             messagebox.showinfo(
                 "Success",
-                "Configuration written to /etc/X11/xorg.conf.d/10-linux-cru.conf.\n\n"
-                "It takes effect on the next X restart (log out and back in).\n"
-                "To undo: delete that file.")
-            self.status_var.set("Configuration applied.")
+                "Configuration saved to /etc/X11/xorg.conf.d/10-linux-cru.conf.\n\n"
+                "The new mode will be available after you restart X\n"
+                "(log out and back in). To undo, delete that file.")
+            self.status_var.set("Configuration applied successfully.")
         else:
             messagebox.showerror("Error", f"Failed to apply configuration:\n{message}")
-            self.status_var.set("Error: failed to apply configuration.")
+            self.status_var.set("Error: Failed to apply configuration")
 
 
 def main():
