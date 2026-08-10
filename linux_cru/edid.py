@@ -61,6 +61,53 @@ class EdidMode:
     location: str        # "base-dtd" / "cta-dtd" / "displayid"
 
 
+@dataclass(frozen=True)
+class EdidInfo:
+    """Who the display says it is, and what it says it can do."""
+    manufacturer: str = ""
+    product_code: int = 0
+    serial_number: int = 0
+    week: int = 0
+    year: int = 0
+    version: str = ""
+    name: str = ""
+    serial_text: str = ""
+    width_cm: int = 0
+    height_cm: int = 0
+    # Declared limits, from the range descriptor. These are what a driver
+    # checks a custom mode against, so they are the numbers that decide
+    # whether an overclock is accepted.
+    min_vrefresh: int = 0
+    max_vrefresh: int = 0
+    min_hsync_khz: int = 0
+    max_hsync_khz: int = 0
+    max_pixel_clock_mhz: int = 0
+
+    @property
+    def display_name(self):
+        if self.name:
+            return self.name
+        if self.manufacturer:
+            return f"{self.manufacturer} {self.product_code:04X}"
+        return "unknown display"
+
+    def summary(self):
+        parts = [self.display_name]
+        if self.width_cm and self.height_cm:
+            inches = ((self.width_cm ** 2 + self.height_cm ** 2) ** 0.5) / 2.54
+            parts.append(f"{self.width_cm}x{self.height_cm} cm ({inches:.0f} in)")
+        if self.year:
+            parts.append(f"made {self.year}")
+        if self.max_vrefresh:
+            limits = f"{self.min_vrefresh}-{self.max_vrefresh} Hz"
+            if self.max_hsync_khz:
+                limits += f", {self.min_hsync_khz}-{self.max_hsync_khz} kHz"
+            if self.max_pixel_clock_mhz:
+                limits += f", up to {self.max_pixel_clock_mhz} MHz"
+            parts.append("declared limits: " + limits)
+        return "   ".join(parts)
+
+
 class Edid:
     def __init__(self, data: bytes):
         if len(data) < BLOCK_SIZE or len(data) % BLOCK_SIZE != 0:
@@ -339,6 +386,52 @@ class Edid:
         self._write_displayid(bi, version, blobs)
 
     # -- main entry points ---------------------------------------------------------
+
+    def info(self) -> EdidInfo:
+        """Identity and declared limits from the base block."""
+        d = self.data
+        packed = (d[8] << 8) | d[9]
+        manufacturer = "".join(
+            chr(((packed >> shift) & 0x1F) + ord("A") - 1)
+            for shift in (10, 5, 0)) if packed else ""
+        if not all("A" <= c <= "Z" for c in manufacturer):
+            manufacturer = ""
+
+        fields = {
+            "manufacturer": manufacturer,
+            "product_code": d[10] | (d[11] << 8),
+            "serial_number": d[12] | (d[13] << 8) | (d[14] << 16) | (d[15] << 24),
+            "week": d[16] if d[16] != 0xFF else 0,
+            "year": d[17] + 1990 if d[17] else 0,
+            "version": f"{d[18]}.{d[19]}",
+            "width_cm": d[21],
+            "height_cm": d[22],
+        }
+
+        for offset in BASE_DESCRIPTOR_OFFSETS:
+            desc = d[offset:offset + 18]
+            if desc[0] or desc[1]:
+                continue                       # a timing, not a description
+            tag = desc[3]
+            if tag in (0xFC, 0xFF):
+                text = bytes(desc[5:18]).split(b"\n")[0].decode(
+                    "ascii", "replace").strip()
+                fields["name" if tag == 0xFC else "serial_text"] = text
+            elif tag == 0xFD:
+                # EDID 1.4 can push the ranges past 255 with offset flags.
+                flags = desc[4]
+                v_off = 255 if flags & 0x02 else 0
+                v_min_off = 255 if flags & 0x01 else 0
+                h_off = 255 if flags & 0x08 else 0
+                h_min_off = 255 if flags & 0x04 else 0
+                fields.update(
+                    min_vrefresh=desc[5] + v_min_off,
+                    max_vrefresh=desc[6] + v_off,
+                    min_hsync_khz=desc[7] + h_min_off,
+                    max_hsync_khz=desc[8] + h_off,
+                    max_pixel_clock_mhz=desc[9] * 10 if desc[9] != 0xFF else 0,
+                )
+        return EdidInfo(**fields)
 
     def list_modes(self):
         modes = []

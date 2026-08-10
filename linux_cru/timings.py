@@ -41,7 +41,15 @@ RB2_H_SYNC = 32
 RB2_VSYNC = 8
 RB2_V_BPORCH = 6
 
-STANDARDS = ("cvt", "cvt-rb", "cvt-rb2")
+# GTF (the formula that predates CVT). Old CRTs were designed around it,
+# and their on-screen geometry is usually calibrated for its blanking.
+GTF_MIN_PORCH = 1          # lines
+GTF_VSYNC_LINES = 3
+GTF_MIN_VSYNC_BP_US = 550.0
+GTF_HSYNC_PERCENT = 8.0
+GTF_CLOCK_STEP_KHZ = 10    # gtf(1) reports two decimals of MHz
+
+STANDARDS = ("cvt", "cvt-rb", "cvt-rb2", "gtf")
 
 
 @dataclass(frozen=True)
@@ -222,6 +230,56 @@ def cvt_rb2(width: int, height: int, refresh: float) -> Modeline:
     )
 
 
+def gtf(width: int, height: int, refresh: float) -> Modeline:
+    """VESA Generalized Timing Formula. Matches xorg gtf(1).
+
+    Superseded by CVT, but it is what CRT monitors were built around, so
+    it is the right choice for one: its generous blanking intervals give
+    the electron beam time to retrace, which is what stops the picture
+    drifting off the edge of the screen.
+    """
+    _check(width, height, refresh)
+    hdisplay = int(round(width / H_GRANULARITY) * H_GRANULARITY)
+    vdisplay = int(round(height))
+
+    h_period_est = (((1.0 / refresh) - GTF_MIN_VSYNC_BP_US / 1e6)
+                    / (vdisplay + GTF_MIN_PORCH) * 1e6)
+    if h_period_est <= 0:
+        raise ValueError("refresh rate too high for this resolution")
+
+    vsync_bp = int(round(GTF_MIN_VSYNC_BP_US / h_period_est))
+    vtotal = vdisplay + vsync_bp + GTF_MIN_PORCH
+
+    v_field_rate_est = 1.0 / h_period_est / vtotal * 1e6
+    h_period = h_period_est / (refresh / v_field_rate_est)
+
+    duty = C_PRIME - (M_PRIME * h_period / 1000.0)
+    hblank = int(round(hdisplay * duty / (100.0 - duty) / (2 * H_GRANULARITY))
+                 * (2 * H_GRANULARITY))
+    htotal = hdisplay + hblank
+
+    clock_khz = int(round(htotal / h_period * 1000.0))
+    clock_khz = int(round(clock_khz / GTF_CLOCK_STEP_KHZ) * GTF_CLOCK_STEP_KHZ)
+
+    hsync = int(round(GTF_HSYNC_PERCENT * htotal / 100.0 / H_GRANULARITY)
+                * H_GRANULARITY)
+    h_front = hblank // 2 - hsync
+
+    return Modeline(
+        clock_khz=clock_khz,
+        hdisplay=hdisplay,
+        hsync_start=hdisplay + h_front,
+        hsync_end=hdisplay + h_front + hsync,
+        htotal=htotal,
+        vdisplay=vdisplay,
+        vsync_start=vdisplay + GTF_MIN_PORCH,
+        vsync_end=vdisplay + GTF_MIN_PORCH + GTF_VSYNC_LINES,
+        vtotal=vtotal,
+        hsync_positive=False,
+        vsync_positive=True,
+    )
+
+
 def calc(width: int, height: int, refresh: float, standard: str = "cvt-rb2") -> Modeline:
     if standard == "cvt":
         return cvt(width, height, refresh)
@@ -229,6 +287,8 @@ def calc(width: int, height: int, refresh: float, standard: str = "cvt-rb2") -> 
         return cvt_rb(width, height, refresh)
     if standard == "cvt-rb2":
         return cvt_rb2(width, height, refresh)
+    if standard == "gtf":
+        return gtf(width, height, refresh)
     raise ValueError(f"unknown timing standard: {standard!r} (expected one of {STANDARDS})")
 
 

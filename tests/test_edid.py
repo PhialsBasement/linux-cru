@@ -131,6 +131,43 @@ def test_fill_base_slots_then_spill():
 
 # -- real-hardware tests ---------------------------------------------------------
 
+def test_identity_and_limits_from_real_edid():
+    path = _real_edid_path()
+    if not path:
+        print("no connected display with EDID - skipping")
+        return
+    with open(path, "rb") as f:
+        info = Edid(f.read()).info()
+    assert info.manufacturer and info.manufacturer.isalpha(), info
+    assert len(info.manufacturer) == 3, info
+    assert info.version.startswith("1."), info
+    assert info.summary(), "the interface needs something to show"
+    print(f"identity: {info.summary()}")
+    if info.max_pixel_clock_mhz:
+        assert 25 <= info.max_pixel_clock_mhz <= 2000, info
+
+
+def test_identity_of_a_synthetic_edid():
+    e = make_base_edid()
+    # "ABC", product 0x1234, made week 10 of 2020, 60x34 cm
+    e.data[8], e.data[9] = 0x04, 0x43
+    e.data[10], e.data[11] = 0x34, 0x12
+    e.data[16], e.data[17] = 10, 30
+    e.data[21], e.data[22] = 60, 34
+    name = b"Test Monitor\n"
+    e.data[54:72] = bytes([0, 0, 0, 0xFC, 0]) + name.ljust(13, b" ")
+    e.data[72:90] = bytes([0, 0, 0, 0xFD, 0, 50, 75, 30, 83, 17]) + b"\n" + b" " * 7
+    info = e.info()
+    assert info.manufacturer == "ABC", info.manufacturer
+    assert info.product_code == 0x1234
+    assert info.year == 2020 and info.week == 10
+    assert info.name == "Test Monitor", repr(info.name)
+    assert (info.min_vrefresh, info.max_vrefresh) == (50, 75), info
+    assert (info.min_hsync_khz, info.max_hsync_khz) == (30, 83), info
+    assert info.max_pixel_clock_mhz == 170, info
+    assert "Test Monitor" in info.summary()
+
+
 def test_real_edid_roundtrip_and_parse():
     path = _real_edid_path()
     if not path:

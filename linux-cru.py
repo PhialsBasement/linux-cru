@@ -146,6 +146,11 @@ class LinuxCRU:
                    command=lambda: self.load_current_settings(quiet=False)
                    ).grid(row=0, column=1, padx=5, pady=5)
 
+        self.monitor_var = tk.StringVar()
+        ttk.Label(frame, textvariable=self.monitor_var, wraplength=780,
+                  foreground="#555555").grid(row=1, column=0, columnspan=2,
+                                             sticky="w", padx=5, pady=(0, 3))
+
     def get_displays(self):
         """Output names: xrandr names on X11, DRM connector names on Wayland."""
         if self.env.session_type == "x11":
@@ -165,8 +170,21 @@ class LinuxCRU:
         others = [c.name for c in self.env.connectors if c.status != "connected"]
         return connected + others if (connected or others) else ["DP-1"]
 
+    def describe_monitor(self):
+        """Identity and declared limits of the selected display."""
+        try:
+            info = edid.Edid.from_connector(
+                self._drm_connector_for(self.display_var.get())).info()
+        except edid.EdidError:
+            self._edid_info = None
+            self.monitor_var.set("No EDID available for this output.")
+            return
+        self._edid_info = info
+        self.monitor_var.set(info.summary())
+
     def load_current_settings(self, quiet=True):
         """Fill the inputs with the selected display's active mode."""
+        self.describe_monitor()
         out = self.display_var.get()
         mode = detect.current_mode(self.env, out)
         if mode:
@@ -224,6 +242,7 @@ class LinuxCRU:
             ("CVT-RBv2 (recommended for modern displays)", "cvt-rb2"),
             ("CVT-RB (reduced blanking v1)", "cvt-rb"),
             ("CVT (full blanking)", "cvt"),
+            ("GTF (for CRT monitors)", "gtf"),
         ]
         for i, (label, value) in enumerate(options):
             ttk.Radiobutton(frame, text=label, variable=self.standard_var, value=value,
@@ -285,6 +304,9 @@ class LinuxCRU:
                   f"{ml.actual_refresh:.3f} Hz actual "
                   f"({self.standard_var.get().upper()})\n"
                   f"# {ml.xorg_modeline(name)}\n\n")
+        warning = self.limits_warning(ml)
+        if warning:
+            header += warning + "\n"
 
         if self.env.session_type == "x11":
             body = self.build_x11_preview(out, name, ml)
@@ -309,6 +331,34 @@ class LinuxCRU:
             status = (f"Method: {self.env.compositor} (no root needed). "
                       "Use Test Mode to try it.")
         self.status_var.set(status)
+
+    def limits_warning(self, ml):
+        """Note anything the display says it cannot do. Not a refusal:
+        monitors routinely run past what they declare, which is the whole
+        point of this tool, but it explains a mode that gets rejected."""
+        info = getattr(self, "_edid_info", None)
+        if not info:
+            return ""
+        notes = []
+        if info.max_pixel_clock_mhz and ml.clock_mhz > info.max_pixel_clock_mhz:
+            notes.append(f"pixel clock {ml.clock_mhz:.0f} MHz is above the "
+                         f"{info.max_pixel_clock_mhz} MHz this display declares")
+        if info.max_vrefresh and ml.actual_refresh > info.max_vrefresh + 0.5:
+            notes.append(f"{ml.actual_refresh:.0f} Hz is above its declared "
+                         f"maximum of {info.max_vrefresh} Hz")
+        hsync_khz = ml.clock_khz / ml.htotal
+        if info.max_hsync_khz and hsync_khz > info.max_hsync_khz + 0.5:
+            notes.append(f"horizontal frequency {hsync_khz:.0f} kHz is above "
+                         f"its declared maximum of {info.max_hsync_khz} kHz")
+        if not notes:
+            return ""
+        lines = ["# This mode goes beyond what the display reports:"]
+        lines += [f"#   - {n}" for n in notes]
+        lines.append("# It may still work. If the driver refuses it, an EDID "
+                     "override raises")
+        lines.append("# these declared limits, which is what the checks are "
+                     "made against.")
+        return "\n".join(lines) + "\n"
 
     def build_x11_preview(self, out, name, ml):
         parts = ["# Test commands (the Test Mode button runs these):\n",

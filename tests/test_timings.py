@@ -58,6 +58,28 @@ def test_cvt_rb_1080p71_matches_overclocking_guide():
     assert ml.vtotal == 1117 and ml.htotal == 2080, ml
 
 
+def test_gtf_matches_reference_modelines():
+    """GTF is what CRT monitors were designed around; xorg gtf(1) output."""
+    for (w, h, r), expected in [
+            ((1024, 768, 75),
+             "81.80 1024 1080 1192 1360 768 769 772 802 -hsync +vsync"),
+            ((1280, 1024, 60),
+             "108.88 1280 1360 1496 1712 1024 1025 1028 1060 -hsync +vsync"),
+            ((1920, 1080, 60),
+             "172.80 1920 2040 2248 2576 1080 1081 1084 1118 -hsync +vsync")]:
+        got = timings.gtf(w, h, r).timing_string()
+        assert got == expected, f"{w}x{h}@{r}\n  want {expected}\n  got  {got}"
+
+
+def test_gtf_blanking_is_generous_enough_for_a_crt():
+    """The reason a CRT needs GTF: reduced blanking leaves too little
+    retrace time, which is what pushes the picture off the screen."""
+    crt = timings.gtf(1024, 768, 75)
+    rb = timings.cvt_rb2(1024, 768, 75)
+    assert (crt.htotal - crt.hdisplay) > 2 * (rb.htotal - rb.hdisplay)
+    assert (crt.vtotal - crt.vdisplay) > (rb.vtotal - rb.vdisplay)
+
+
 def test_rb2_invariants():
     for (w, h, r) in [(1920, 1080, 75), (2560, 1440, 165), (3840, 2160, 120),
                       (1366, 768, 60), (5120, 1440, 90), (1920, 1080, 59.94)]:
@@ -83,6 +105,8 @@ def test_refresh_too_high_raises():
 def test_calc_dispatch():
     assert timings.calc(1920, 1080, 60, "cvt").clock_khz == 173000
     assert timings.calc(1920, 1080, 60, "cvt-rb").clock_khz == 138500
+    assert timings.calc(1920, 1080, 60, "gtf").clock_khz == 172800
+    assert set(timings.STANDARDS) == {"cvt", "cvt-rb", "cvt-rb2", "gtf"}
     try:
         timings.calc(1920, 1080, 60, "nonsense")
     except ValueError:
