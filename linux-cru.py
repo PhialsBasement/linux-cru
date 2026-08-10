@@ -17,7 +17,9 @@ from tkinter import ttk, messagebox
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from linux_cru import detect, timings, wayland
+import tempfile
+
+from linux_cru import detect, edid, override, persist, timings, wayland
 
 TEST_REVERT_SECONDS = 15
 
@@ -342,23 +344,34 @@ class LinuxCRU:
     def _edid_override_notes(self, out, name, ml, reason):
         conn = self._drm_connector_for(out)
         short = self._strip_card(conn)
-        tool = self.env.initramfs_tool or "your initramfs tool"
+
+        try:
+            e = edid.Edid.from_connector(conn)
+            placement = "a detailed timing descriptor" \
+                if e.fits_dtd(ml) else "a DisplayID timing record"
+            detail = (f"# This mode will be added to the EDID as {placement}.\n")
+        except edid.EdidError as err:
+            detail = f"# Warning: could not read the current EDID ({err}).\n"
+
+        steps = "\n".join(f"#   {i}. {s}" for i, s in
+                          enumerate(persist.describe_plan(short), 1))
+        installed = persist.installed_connectors()
+        state = ("# Currently installed overrides: "
+                 + (", ".join(installed) if installed else "none") + "\n")
+
         return (f"# {reason}\n"
-                "# Adding this mode requires an EDID override. Steps:\n"
-                "#   1. Dump the current EDID:\n"
-                f"#        cat /sys/class/drm/{conn}/edid > mon.bin\n"
-                "#   2. Add this timing to it as a detailed timing block\n"
-                "#      (wxEDID, or export from Windows CRU):\n"
-                f"#        {ml.xorg_modeline(name)}\n"
-                "#   3. Install the file:\n"
-                "#        sudo install -Dm644 custom.bin /usr/lib/firmware/edid/custom.bin\n"
-                "#   4. Add to the kernel command line:\n"
-                f"#        drm.edid_firmware={short}:edid/custom.bin\n"
-                f"#   5. Add the file to the initramfs ({tool}) and reboot.\n"
-                "# To test without rebooting (as root):\n"
-                f"#   cat custom.bin > /sys/kernel/debug/dri/<N>/{short}/edid_override\n"
-                f"#   echo 1 > /sys/kernel/debug/dri/<N>/{short}/trigger_hotplug\n"
-                "# Full details: docs/RESEARCH.md in the linux-cru repo.\n")
+                "# This tool adds the mode by overriding the EDID the kernel\n"
+                "# reads from the display. It works on every compositor.\n"
+                f"{detail}"
+                "#\n"
+                "# Test Mode applies it immediately (needs root, no reboot) and\n"
+                "# reverts automatically unless you keep it.\n"
+                "#\n"
+                "# Apply Configuration makes it permanent:\n"
+                f"{steps}\n"
+                "#\n"
+                f"{state}"
+                f"# Connector: {short}   Timing: {ml.xorg_modeline(name)}\n")
 
     def _drm_connector_for(self, out):
         for c in self.env.connectors:
@@ -388,12 +401,158 @@ class LinuxCRU:
                                     command=self.apply_configuration)
         self.apply_btn.grid(row=0, column=3, padx=5)
 
-        if not (self.env.session_type == "x11" or self._wayland_testable()):
-            self.test_btn.state(["disabled"])
+        self.remove_btn = ttk.Button(frame, text="Remove",
+                                     command=self.remove_persistent_override)
+        self.remove_btn.grid(row=0, column=4, padx=5)
+        self.refresh_remove_button()
 
         self.status_var = tk.StringVar()
         ttk.Label(self.main_frame, textvariable=self.status_var,
                   wraplength=780).grid(row=6, column=0, sticky="ew", pady=5)
+
+    def refresh_remove_button(self):
+        if persist.installed_connectors():
+            self.remove_btn.state(["!disabled"])
+        else:
+            self.remove_btn.state(["disabled"])
+
+    # -- method selection ----------------------------------------------------------
+
+    def use_edid_method(self):
+        """True when this environment needs the EDID override backend."""
+        env = self.env
+        if env.session_type == "x11":
+            return False
+        return not self._wayland_testable()
+
+    # -- EDID override backend ------------------------------------------------------
+
+    def _build_patched_edid(self, out, ml):
+        """(patched_bytes, placement) for the selected display, or raises."""
+        conn = self._drm_connector_for(out)
+        e = edid.Edid.from_connector(conn)
+        placement = e.add_mode(ml)
+        return e.to_bytes(), placement
+
+    def _run_root_script(self, script, name):
+        """Write `script` to the work dir and run it with pkexec."""
+        path = os.path.join(self._work_dir(), name)
+        with open(path, "w") as f:
+            f.write(script)
+        os.chmod(path, 0o755)
+        return run_with_sudo(["/bin/bash", path])
+
+    def _work_dir(self):
+        if not getattr(self, "_workdir_path", None):
+            self._workdir_path = tempfile.mkdtemp(prefix="linux-cru-")
+            os.chmod(self._workdir_path, 0o755)
+        return self._workdir_path
+
+    def _test_mode_edid(self, out, ml):
+        conn = self._drm_connector_for(out)
+        card = conn.partition("-")[0]
+        connector = self._strip_card(conn)
+
+        try:
+            patched, placement = self._build_patched_edid(out, ml)
+        except edid.EdidError as e:
+            messagebox.showerror("Error", f"Could not build the EDID:\n{e}")
+            return
+
+        edid_path = os.path.join(self._work_dir(), f"{connector}.bin")
+        with open(edid_path, "wb") as f:
+            f.write(patched)
+        os.chmod(edid_path, 0o644)
+
+        script = override.build_test_script(card, connector, edid_path,
+                                            TEST_REVERT_SECONDS + 10)
+        ok, message = self._run_root_script(script, "test-override.sh")
+        if not ok:
+            messagebox.showerror(
+                "Error",
+                f"Could not apply the EDID override:\n{message}\n\n"
+                "This needs root access and a kernel without lockdown "
+                "restrictions on debugfs.")
+            return
+
+        self.status_var.set(
+            f"EDID override active. The new mode was added as {placement} and "
+            f"should now appear in your display settings.")
+
+        def revert():
+            self._run_root_script(override.build_revert_script(card, connector),
+                                  "revert-override.sh")
+
+        def keep():
+            self._run_root_script(
+                f"#!/bin/bash\ntouch '{override.keep_flag_path(connector)}'\n",
+                "keep-override.sh")
+
+        self._show_revert_dialog(
+            out, revert,
+            keep_status="Override kept for this session. Use Apply Configuration "
+                        "to keep it after a reboot.",
+            on_keep=keep,
+            message=(f"The mode was added to {out} and the display was "
+                     f"re-detected.\n\nSelect it in your display settings to "
+                     f"try it."))
+
+    def _apply_edid_override(self, out, ml):
+        conn = self._drm_connector_for(out)
+        connector = self._strip_card(conn)
+        try:
+            patched, placement = self._build_patched_edid(out, ml)
+        except edid.EdidError as e:
+            messagebox.showerror("Error", f"Could not build the EDID:\n{e}")
+            return
+
+        steps = "\n".join(f"  {i}. {s}"
+                          for i, s in enumerate(persist.describe_plan(connector), 1))
+        if not messagebox.askyesno(
+                "Make permanent",
+                f"This will make the override load at every boot:\n\n{steps}\n\n"
+                "Test the mode first if you have not. If the display ever fails "
+                "to come up, remove the drm.edid_firmware parameter from the "
+                "kernel command line in your bootloader menu.\n\nContinue?"):
+            return
+
+        edid_path = os.path.join(self._work_dir(), f"{connector}-persist.bin")
+        with open(edid_path, "wb") as f:
+            f.write(patched)
+        os.chmod(edid_path, 0o644)
+
+        ok, message = self._run_root_script(
+            persist.build_install_script(connector, edid_path), "install.sh")
+        self.refresh_remove_button()
+        if ok:
+            messagebox.showinfo(
+                "Installed",
+                f"The mode was added as {placement} and installed.\n\n"
+                "It takes effect after a reboot. Use Remove to undo it.")
+            self.status_var.set("Persistent EDID override installed. "
+                                "Reboot for it to take effect.")
+        else:
+            messagebox.showerror("Error", f"Installation failed:\n{message}")
+
+    def remove_persistent_override(self):
+        installed = persist.installed_connectors()
+        if not installed:
+            return
+        out = self._strip_card(self._drm_connector_for(self.display_var.get()))
+        target = out if out in installed else None
+        what = f"the override for {target}" if target else \
+               f"all overrides ({', '.join(installed)})"
+        if not messagebox.askyesno("Remove", f"Remove {what}?"):
+            return
+        ok, message = self._run_root_script(
+            persist.build_uninstall_script(target), "uninstall.sh")
+        self.refresh_remove_button()
+        if ok:
+            messagebox.showinfo("Removed",
+                                "Removed. It takes effect after a reboot.")
+            self.status_var.set("Persistent override removed. Reboot to apply.")
+        else:
+            messagebox.showerror("Error", f"Could not remove it:\n{message}")
 
     # -- live test (X11) ---------------------------------------------------------
 
@@ -446,10 +605,7 @@ class LinuxCRU:
             else:
                 self._test_mode_wlroots(out, ml)
         else:
-            messagebox.showinfo(
-                "Not supported here",
-                "Live testing is not possible in this environment.\n"
-                "See the preview for what to do instead.")
+            self._test_mode_edid(out, ml)
 
     def _test_mode_x11(self, out, name, ml):
         previous = self._current_mode(out)
@@ -551,10 +707,11 @@ class LinuxCRU:
             keep_status="Mode applied for this session. To keep it permanently, "
                         "add the line from the preview to your compositor config.")
 
-    def _show_revert_dialog(self, out, on_revert, keep_status):
+    def _show_revert_dialog(self, out, on_revert, keep_status,
+                            on_keep=None, message=None):
         dialog = tk.Toplevel(self.root)
         dialog.title("Testing mode")
-        dialog.geometry("420x140")
+        dialog.geometry("460x190")
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.protocol("WM_DELETE_WINDOW", lambda: None)
@@ -578,14 +735,18 @@ class LinuxCRU:
             if state["done"]:
                 return
             state["done"] = True
+            if on_keep:
+                on_keep()
             dialog.destroy()
             self.status_var.set(keep_status)
+
+        head = message or f"Testing new mode on {out}."
 
         def tick():
             if state["done"]:
                 return
             n = remaining.get()
-            label.config(text=f"Testing new mode on {out}.\n\n"
+            label.config(text=f"{head}\n\n"
                               f"Reverting in {n} seconds.\n"
                               f"Press Enter or click Keep to keep it.")
             if n <= 0:
@@ -620,11 +781,12 @@ class LinuxCRU:
                         "permanently, add the line from the preview to your\n"
                         "compositor config file.")
             else:
-                messagebox.showinfo(
-                    "Wayland",
-                    "On Wayland, apply the mode with the commands shown in\n"
-                    "the preview. Applying directly from this tool is not\n"
-                    "supported in this environment yet.")
+                try:
+                    _, ml = self.current_modeline()
+                except ValueError as e:
+                    messagebox.showerror("Error", f"Invalid input: {e}")
+                    return
+                self._apply_edid_override(self.display_var.get(), ml)
             return
         try:
             name, ml = self.current_modeline()

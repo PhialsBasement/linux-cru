@@ -73,8 +73,11 @@ class Edid:
     def from_connector(cls, connector):
         """Load from a DRM connector name like 'card1-DP-1'."""
         path = f"/sys/class/drm/{connector}/edid"
-        with open(path, "rb") as f:
-            data = f.read()
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            raise EdidError(f"cannot read the EDID of {connector}: {e}") from e
         if not data:
             raise EdidError(f"{connector} has no EDID (display disconnected?)")
         return cls(data)
