@@ -2,12 +2,7 @@ name: Build and Release AppImage
 on:
   push:
     branches: [ main ]
-    paths:
-      - 'linux-cru.py'
-      - 'linux_cru/**'
-      - 'tests/**'
-      - 'build_appimage.sh'
-      - '.github/workflows/build.yml'
+    tags: [ 'v*' ]
   pull_request:
   workflow_dispatch:
 
@@ -61,34 +56,37 @@ jobs:
         xvfb-run -a env -u PYTHONPATH -u PYTHONHOME \
           ./Linux_CRU-x86_64.AppImage --self-test
 
-    - name: Generate new tag
-      if: github.event_name != 'pull_request'
-      id: tag
+    - name: Check the tag matches the version in the code
+      if: startsWith(github.ref, 'refs/tags/v')
       run: |
-        latest_tag=$(git describe --tags `git rev-list --tags --max-count=1` 2>/dev/null || echo "v0.0.0")
-        major=$(echo $latest_tag | cut -d. -f1 | tr -d 'v')
-        minor=$(echo $latest_tag | cut -d. -f2)
-        patch=$(echo $latest_tag | cut -d. -f3)
-        new_patch=$((patch + 1))
-        new_tag="v$major.$minor.$new_patch"
-        echo "new_tag=$new_tag" >> $GITHUB_OUTPUT
+        code_version=$(python3 -c "import linux_cru; print(linux_cru.__version__)")
+        tag_version="${GITHUB_REF_NAME#v}"
+        if [ "$code_version" != "$tag_version" ]; then
+          echo "tag $GITHUB_REF_NAME does not match __version__ $code_version" >&2
+          exit 1
+        fi
+        echo "version $code_version"
 
+    # Releases come from tags now. Pushing to main builds and tests but
+    # publishes nothing, so a release stays the thing that was announced
+    # instead of being replaced by the next commit.
     - name: Create Release
-      if: github.event_name != 'pull_request'
+      if: startsWith(github.ref, 'refs/tags/v')
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: ${{ steps.tag.outputs.new_tag }}
-        name: Release ${{ steps.tag.outputs.new_tag }}
+        tag_name: ${{ github.ref_name }}
+        name: Linux CRU ${{ github.ref_name }}
         draft: false
         prerelease: false
         files: Linux_CRU-x86_64.AppImage
+        generate_release_notes: true
         body: |
-          Automated release for commit ${{ github.sha }}
-
           The AppImage bundles Python, tkinter and the whole Tcl/Tk
-          runtime, so it does not need Python installed on your system.
+          runtime, so it does not need anything installed on your system.
 
-          Download it, make it executable with
-          `chmod +x Linux_CRU-x86_64.AppImage`, and run it.
+          ```
+          chmod +x Linux_CRU-x86_64.AppImage
+          ./Linux_CRU-x86_64.AppImage
+          ```
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
