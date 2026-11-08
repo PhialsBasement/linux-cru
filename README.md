@@ -62,6 +62,22 @@ On Arch Linux:
 
 The tool never changes your resolution behind your back: applying a custom mode makes it *available to select*, it doesn't force your display onto it.
 
+### Checking which timings are actually in use
+
+Display settings round the refresh rate and don't say which blanking formula a mode uses, so a custom 59.94 Hz mode can be hard to tell from a built-in 60 Hz one. To see the exact mode the kernel is driving on each output, along with the CVT/CVT-RB/CVT-RB2/GTF formula it matches:
+
+```bash
+sudo ./Linux_CRU-x86_64.AppImage --active-timings
+```
+
+### Boot service tuning
+
+If the boot service applies the override before your GPU driver is ready (this shows up as a broken console or desktop on some boots), give it more time in `/etc/default/linux-cru`:
+
+```bash
+LINUX_CRU_SETTLE_DELAY=5   # seconds to wait after the display connectors are up (default 1)
+```
+
 ## Warning
 
 ⚠️ Setting incorrect display timings can lead to a blank screen. Test Mode reverts by itself, but for permanent changes keep a way to get back in (another TTY, or removing the setting) in mind. Persistent EDID overrides that use the kernel command line can be undone from the bootloader menu.

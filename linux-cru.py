@@ -1299,6 +1299,10 @@ def main():
     if "--self-test" in sys.argv:
         self_test()
         return
+    if "--active-timings" in sys.argv:
+        from linux_cru import active
+        print(active.report())
+        return
     if "--version" in sys.argv:
         import linux_cru
         print(f"Linux CRU {linux_cru.__version__}")
