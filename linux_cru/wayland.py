@@ -201,16 +201,71 @@ def sway_set_mode(output, width, height, refresh):
 
 
 # -- Hyprland -------------------------------------------------------------------
+#
+# Hyprland 0.55+ can be configured in Lua (hyprland.lua). A session started
+# from a Lua config rejects every `hyprctl keyword` -- on stdout, with exit
+# status 0 -- and wants `hyprctl eval 'hl.monitor({...})'` instead. Try the
+# legacy form first and fall back when the reply says so.
+
+def hyprland_lua_config(home=None):
+    """True if the user's Hyprland config is the Lua one."""
+    import os
+    home = home or os.path.expanduser("~")
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    return os.path.exists(os.path.join(base, "hypr", "hyprland.lua"))
+
+
+def hyprland_layout(output):
+    """(position, scale) of `output` so a mode change does not move it."""
+    res = _run(["hyprctl", "monitors", "-j"])
+    if res.returncode == 0:
+        try:
+            for o in json.loads(res.stdout):
+                if o.get("name") == output:
+                    return (f"{int(o.get('x', 0))}x{int(o.get('y', 0))}",
+                            float(o.get("scale", 1)))
+        except (ValueError, TypeError):
+            pass
+    return "auto", 1.0
+
+
+def _lua_str(s):
+    return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def hyprland_lua_monitor(output, mode, position="auto", scale=1.0):
+    """The hl.monitor({...}) call for a Lua config / hyprctl eval."""
+    return (f"hl.monitor({{ output = {_lua_str(output)}, mode = {_lua_str(mode)}, "
+            f"position = {_lua_str(position)}, scale = {scale:g} }})")
+
+
+def _hyprland_rejects_keyword(text):
+    t = (text or "").lower()
+    return "non-legacy" in t or ("keyword" in t and "eval" in t)
+
+
+def _hyprland_ok(res):
+    return res.returncode == 0 and (res.stdout or "").strip().lower() == "ok"
+
+
+def hyprland_monitor(output, mode):
+    """Apply a monitor rule with `mode`, keeping position and scale."""
+    position, scale = hyprland_layout(output)
+    res = _run(["hyprctl", "keyword", "monitor",
+                f"{output}, {mode}, {position}, {scale:g}"])
+    if _hyprland_ok(res):
+        return True, ""
+    if _hyprland_rejects_keyword(res.stdout) or _hyprland_rejects_keyword(res.stderr):
+        res = _run(["hyprctl", "eval",
+                    hyprland_lua_monitor(output, mode, position, scale)])
+        if _hyprland_ok(res):
+            return True, ""
+    return False, (res.stderr or res.stdout)
+
 
 def hyprland_apply_modeline(output, timing_string):
-    res = _run(["hyprctl", "keyword", "monitor",
-                f"{output}, modeline {timing_string}, 0x0, 1"])
-    ok = res.returncode == 0 and "ok" in (res.stdout or "").lower()
-    return ok, (res.stderr or res.stdout)
+    return hyprland_monitor(output, f"modeline {timing_string}")
 
 
 def hyprland_set_mode(output, width, height, refresh):
-    res = _run(["hyprctl", "keyword", "monitor",
-                f"{output}, {width}x{height}@{refresh:g}, 0x0, 1"])
-    ok = res.returncode == 0 and "ok" in (res.stdout or "").lower()
-    return ok, (res.stderr or res.stdout)
+    return hyprland_monitor(output, f"{width}x{height}@{refresh:g}")

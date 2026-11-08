@@ -586,10 +586,18 @@ class LinuxCRU:
                     f"output {out} modeline {ml.timing_string()}\n")
 
         if env.compositor == "hyprland":
+            mode = f"modeline {ml.timing_string()}"
+            pos, scale = wayland.hyprland_layout(out)
+            if wayland.hyprland_lua_config():
+                call = wayland.hyprland_lua_monitor(out, mode, pos, scale)
+                return ("# Run now:\n"
+                        f"hyprctl eval '{call}'\n\n"
+                        "# To make it permanent, add to ~/.config/hypr/hyprland.lua:\n"
+                        f"{call}\n")
             return ("# Run now:\n"
-                    f"hyprctl keyword monitor \"{out}, modeline {ml.timing_string()}, 0x0, 1\"\n\n"
+                    f"hyprctl keyword monitor \"{out}, {mode}, {pos}, {scale:g}\"\n\n"
                     "# To make it permanent, add to ~/.config/hypr/hyprland.conf:\n"
-                    f"monitor = {out}, modeline {ml.timing_string()}, 0x0, 1\n")
+                    f"monitor = {out}, {mode}, {pos}, {scale:g}\n")
 
         if env.compositor == "kwin":
             mhz = int(round(r * 1000))
