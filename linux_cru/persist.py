@@ -64,6 +64,9 @@ KERNEL_CMDLINE = "/etc/kernel/cmdline"
 
 SYSTEMD_UNIT = "/etc/systemd/system/linux-cru-edid.service"
 SYSTEMD_HELPER = "/var/lib/linux-cru/apply-edid.sh"
+# Optional, user-edited: LINUX_CRU_SETTLE_DELAY=<seconds> to wait longer
+# at boot before the override is applied.
+SETTINGS_FILE = "/etc/default/linux-cru"
 
 METHOD_SYSTEMD = "systemd"
 METHOD_CMDLINE = "cmdline"
@@ -83,6 +86,7 @@ def systemd_unit_text():
             f"ConditionPathExists={SYSTEMD_HELPER}\n\n"
             f"[Service]\n"
             f"Type=oneshot\n"
+            f"EnvironmentFile=-{SETTINGS_FILE}\n"
             f"RemainAfterExit=yes\n"
             f"ExecStart={SYSTEMD_HELPER}\n\n"
             f"[Install]\n"
@@ -105,6 +109,8 @@ def systemd_helper_text():
             f"    [ -n \"$value\" ] && value=\"$value,\"\n"
             f"    value=\"$value$conn:edid/$(basename \"$f\")\"\n"
             f"done\n"
+            f"# wait for udev and for the connectors to finish probing\n"
+            f"udevadm settle --timeout=10; sleep ${{LINUX_CRU_SETTLE_DELAY:-1}}\n"
             f"echo \"$value\" > /sys/module/drm/parameters/edid_firmware\n"
             f"# ...then trigger_hotplug / status=detect on each connector\n")
 
@@ -279,6 +285,34 @@ for f in "$FWDIR/$PREFIX"*.bin; do
 done
 [ -n "$value" ] || exit 0
 
+# Wait for the GPU driver to finish probing before touching anything.
+# The GPU module is loaded by udev, so on a fast boot this can run while
+# the driver is still bringing the connectors up, and re-probing then
+# can leave the console framebuffer in a bad state (seen on amdgpu with
+# simpledrm disabled). Give udev up to 10 s to settle, then wait up to
+# 15 s for each of our connectors to exist and report a definite status.
+# Both waits can be tuned in /etc/default/linux-cru.
+command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout=10 || true
+for f in "$FWDIR/$PREFIX"*.bin; do
+    [ -e "$f" ] || continue
+    base=$(basename "$f")
+    conn=${{base#$PREFIX}}
+    conn=${{conn%.bin}}
+    for i in $(seq 1 "${{LINUX_CRU_PROBE_WAIT:-150}}"); do
+        ready=0
+        for path in /sys/class/drm/card*-"$conn"; do
+            [ -e "$path/status" ] || continue
+            case "$(cat "$path/status" 2>/dev/null)" in
+                connected|disconnected) ready=1 ;;
+            esac
+        done
+        [ "$ready" = 1 ] && break
+        sleep 0.1
+    done
+done
+# and a moment for the driver's framebuffer console to finish setting up
+sleep "${{LINUX_CRU_SETTLE_DELAY:-1}}"
+
 # point the firmware loader at our writable dir (works where /usr is
 # read-only), then apply the overrides
 printf '%s' "$SEARCHPATH" > /sys/module/firmware_class/parameters/path
@@ -331,6 +365,7 @@ ConditionPathExists=$HELPER
 
 [Service]
 Type=oneshot
+EnvironmentFile=-{SETTINGS_FILE}
 RemainAfterExit=yes
 ExecStart=$HELPER
 
@@ -487,9 +522,12 @@ update_initramfs_config() {{
 # Managed by Linux CRU
 [ "$1" = prereqs ] && {{ echo; exit 0; }}
 . /usr/share/initramfs-tools/hook-functions
-mkdir -p "${{DESTDIR}}/lib/firmware/edid"
-for f in /usr/lib/firmware/edid/linux-cru-*.bin; do
+# same path as on the root fs (firmware_class.path points there), plus the
+# standard firmware dir in case the kernel is booted without that param
+mkdir -p "${{DESTDIR}}{FIRMWARE_DIR}" "${{DESTDIR}}/lib/firmware/edid"
+for f in {FIRMWARE_DIR}/{FILE_PREFIX}*.bin; do
     [ -e "$f" ] || continue
+    cp "$f" "${{DESTDIR}}{FIRMWARE_DIR}/"
     cp "$f" "${{DESTDIR}}/lib/firmware/edid/"
 done
 HOOKEOF

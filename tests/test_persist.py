@@ -45,6 +45,10 @@ def _sandbox(root, bootloader="limine"):
                     'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"\n')
 
 
+# don't let the boot helper's settle waits slow the tests down
+_FAST = dict(os.environ, LINUX_CRU_SETTLE_DELAY="0", LINUX_CRU_PROBE_WAIT="0")
+
+
 def _run(script, root):
     """Run a generated script with mkinitcpio/limine-update stubbed out."""
     bindir = f"{root}/stubbin"
@@ -156,11 +160,14 @@ def test_systemd_method_leaves_boot_path_alone():
         assert "After=local-fs.target" in unit, unit
         assert "Type=oneshot" in unit and "RemainAfterExit=yes" in unit, unit
         assert "WantedBy=graphical.target" in unit, unit
+        assert "EnvironmentFile=-/etc/default/linux-cru" in unit, unit
 
         helper = open(persist.SYSTEMD_HELPER).read()
         assert "edid_firmware" in helper
         assert "DP-1" not in helper, "helper should be generic, not per-display"
         assert "@FWDIR@" not in helper, "template placeholder not substituted"
+        # waits for the driver to finish probing (issue #16)
+        assert "udevadm settle" in helper and "LINUX_CRU_SETTLE_DELAY" in helper
         assert os.access(persist.SYSTEMD_HELPER, os.X_OK)
 
         # the boot path must be untouched
@@ -180,7 +187,7 @@ def test_systemd_method_leaves_boot_path_alone():
                                    f'> "{root}/param.out"')
                           .replace('echo 1 > "/sys/kernel/debug', 'true # ')
                           .replace('echo detect > "$path/status"', "true"))
-        subprocess.run(["bash", probe], capture_output=True)
+        subprocess.run(["bash", probe], capture_output=True, env=_FAST)
         assert open(f"{root}/param.out").read().strip() == \
             "DP-1:edid/linux-cru-DP-1.bin", open(f"{root}/param.out").read()
 
@@ -215,7 +222,7 @@ def test_systemd_helper_handles_two_displays():
                                    f'> "{root}/param.out"')
                           .replace('echo 1 > "/sys/kernel/debug', 'true # ')
                           .replace('echo detect > "$path/status"', "true"))
-        subprocess.run(["bash", probe], capture_output=True)
+        subprocess.run(["bash", probe], capture_output=True, env=_FAST)
         value = open(f"{root}/param.out").read().strip()
         assert value.count(",") == 1, value
         assert "DP-1:edid/linux-cru-DP-1.bin" in value, value
@@ -302,3 +309,10 @@ if __name__ == "__main__":
                 failures += 1
                 print(f"FAIL {name}: {e}")
     sys.exit(1 if failures else 0)
+
+
+def test_initramfs_tools_hook_copies_from_var():
+    # the EDIDs moved to /var for immutable distros; the hook must follow
+    snippet = persist._initramfs_snippet()
+    assert "/usr/lib/firmware/edid/linux-cru-" not in snippet
+    assert f"for f in {persist.FIRMWARE_DIR}/{persist.FILE_PREFIX}*.bin" in snippet
